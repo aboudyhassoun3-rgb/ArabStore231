@@ -22,7 +22,9 @@ IS_VERCEL = os.environ.get("VERCEL") == "1"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.environ.get("ARAB_DATA_DIR") or ("/tmp/arab-store" if IS_VERCEL else BASE_DIR)
 os.makedirs(DATA_DIR, exist_ok=True)
-DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+DATABASE_URL = (os.environ.get("DATABASE_URL", "").strip()
+                or os.environ.get("POSTGRES_URL", "").strip()
+                or os.environ.get("POSTGRES_PRISMA_URL", "").strip())
 USE_PG = bool(DATABASE_URL)
 
 SECRET_KEY = os.environ.get("ARAB_SECRET_KEY") or None
