@@ -1622,6 +1622,7 @@ def reset_pw():
     return jsonify({"message": "تم تعيين كلمة مرور جديدة ✅"})
 
 @app.get("/api/auth/admin-auto-login")
+@app.post("/api/auth/admin-auto-login")
 @require_auth
 def admin_auto():
     email = request.wu["email"] if "email" in request.wu.keys() else request.wu[2]

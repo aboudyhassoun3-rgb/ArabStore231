@@ -97,6 +97,10 @@
 
     <!-- ========== 1) الرئيسية ========== -->
     <section class="admin-section active" id="sec-dashboard">
+      <div id="ephemeralWarn" style="display:none; margin-bottom:12px; padding:12px 14px; border-radius:12px; background:rgba(255,176,32,.12); border:1px solid rgba(255,176,32,.5); font-size:12.5px; line-height:1.9;">
+        ⚠️ <b>التخزين مؤقت!</b> البيانات (المستخدمون والطلبات والمنتجات) ستُمسح مع كل إعادة نشر.
+        ثبّتها نهائياً: Vercel ← Storage ← Create ← Postgres ← Connect ثم Redeploy.
+      </div>
       <div class="admin-grid">
         <div class="kpi-card"><div class="lbl"><i class="fa-solid fa-users"></i> إجمالي المستخدمين</div><div class="val" id="kpiUsers">—</div></div>
         <div class="kpi-card"><div class="lbl"><i class="fa-solid fa-bag-shopping"></i> إجمالي الطلبات</div><div class="val" id="kpiOrders">—</div></div>

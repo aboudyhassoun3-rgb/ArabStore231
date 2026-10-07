@@ -270,6 +270,10 @@ document.addEventListener("click", (e)=>{
 
 /* ===== 1) لوحة المعلومات ===== */
 async function loadDashboard(){
+  fetch("/health").then(r=>r.json()).then(h=>{
+    const w = document.getElementById("ephemeralWarn");
+    if(w && h && h.storage && h.storage !== "persistent-postgres") w.style.display = "block";
+  }).catch(()=>{});
   const stats = await adminFetch("/admin/stats");
   document.getElementById("kpiUsers").textContent = stats.total_users.toLocaleString();
   document.getElementById("kpiOrders").textContent = stats.total_orders.toLocaleString();
