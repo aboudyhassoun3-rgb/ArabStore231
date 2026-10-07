@@ -902,7 +902,10 @@ def v1_order():
 @limiter.limit("10 per minute")
 def alogin():
     b = request.get_json(force=True, silent=True) or {}
-    if (b.get("password") or "") != ADMIN_PASSWORD: return jsonify({"message": "كلمة المرور غير صحيحة"}), 401
+    pw = b.get("password") or ""
+    eff = get_setting("admin_password_hash", "")
+    ok = check_password_hash(eff, pw) if eff else hmac.compare_digest(pw, ADMIN_PASSWORD)
+    if not ok: return jsonify({"message": "كلمة المرور غير صحيحة"}), 401
     return jsonify({"token": issue_token(None, admin=True, owner=True), "owner": True})
 
 @app.get("/api/admin/stats")
@@ -1550,6 +1553,7 @@ CREATE TABLE IF NOT EXISTS import_batches(id TEXT PRIMARY KEY, created_at TIMEST
 CREATE TABLE IF NOT EXISTS import_items(batch_id TEXT, kind TEXT, ref_id INTEGER);
 CREATE TABLE IF NOT EXISTS bot_admins(user_id INTEGER PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS auth_tokens(token TEXT PRIMARY KEY, web_id INTEGER, is_admin INTEGER DEFAULT 0, is_owner INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS snapshots(id TEXT PRIMARY KEY, reason TEXT DEFAULT '', payload TEXT DEFAULT '', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 """
 def ensure_extra():
     with get_db() as db:
@@ -2601,13 +2605,146 @@ def adm_restore():
 @app.post("/api/admin/wipe-data")
 @require_admin
 def adm_wipe():
+    b = request.get_json(force=True, silent=True) or {}
+    if (b.get("confirm") or "").strip() != "حذف":
+        return jsonify({"message": "اكتب كلمة (حذف) للتأكيد"}), 400
+    scope = b.get("scope") or "users"
+    _auto_snapshot("pre-wipe")
     with get_db() as db:
+        if scope == "all":
+            for t in ("category_links", "skus", "products", "subsections", "sections",
+                      "orders", "deposit_requests", "transactions", "notifications",
+                      "banners", "import_items", "import_batches", "referrals",
+                      "providers", "web_users", "balances", "user_tier"):
+                try: db.execute(f"DELETE FROM {t}")
+                except Exception: pass
+            return jsonify({"message": "تم مسح كل شيء ✅ (أُخذت نسخة أمان قبل الحذف)"})
         for t in ("orders", "deposit_requests", "transactions", "notifications", "banners", "import_items", "import_batches", "referrals"):
             try: db.execute(f"DELETE FROM {t}")
             except Exception: pass
         try: db.execute("UPDATE balances SET balance=0")
         except Exception: pass
-    return jsonify({"message": "تم مسح البيانات التشغيلية ✅ (بقي المستخدمون والكتالوج)"})
+    return jsonify({"message": "تم مسح البيانات التشغيلية ✅ (بقي المستخدمون والكتالوج — وأُخذت نسخة أمان)"})
+
+@app.get("/api/admin/snapshots")
+@require_admin
+def adm_snaps():
+    with get_db() as db:
+        try: rows = db.execute("SELECT id,reason,created_at,LENGTH(payload) FROM snapshots ORDER BY created_at DESC").fetchall()
+        except Exception: rows = []
+    return jsonify([{"id": r[0], "reason": r[1], "created_at": str(r[2]), "size_kb": round((r[3] or 0) / 1024, 1)} for r in rows])
+
+@app.post("/api/admin/snapshots/<string:sid>/restore")
+@require_admin
+def adm_snap_restore(sid):
+    import json as _j
+    with get_db() as db:
+        r = db.execute("SELECT payload FROM snapshots WHERE id=?", (sid,)).fetchone()
+    if not r: return jsonify({"message": "النسخة غير موجودة"}), 404
+    _restore_tables(_j.loads(r[0]))
+    return jsonify({"message": "تمت الاستعادة ✅"})
+
+@app.delete("/api/admin/snapshots/<string:sid>")
+@require_admin
+def adm_snap_del(sid):
+    with get_db() as db: db.execute("DELETE FROM snapshots WHERE id=?", (sid,))
+    return jsonify({"message": "تم الحذف"})
+
+@app.get("/api/admin/backup-json")
+@require_admin
+def adm_backup_json():
+    import json as _j
+    payload = _j.dumps({"exported_at": datetime.now().isoformat(), "tables": _dump_tables()}, ensure_ascii=False, default=str)
+    name = f"arab-store-backup-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
+    return app.response_class("\ufeff" + payload, mimetype="application/json",
+                              headers={"Content-Disposition": f"attachment; filename={name}"})
+
+@app.post("/api/admin/restore-json")
+@require_admin
+def adm_restore_json():
+    import json as _j
+    if "file" not in request.files: return jsonify({"message": "أرفق ملف JSON"}), 400
+    try: data = _j.loads(request.files["file"].read().decode("utf-8-sig"))
+    except Exception: return jsonify({"message": "ملف غير صالح"}), 400
+    tables = data.get("tables", data)
+    if not isinstance(tables, dict): return jsonify({"message": "ملف غير صالح"}), 400
+    _auto_snapshot("pre-restore")
+    _restore_tables(tables)
+    return jsonify({"message": "تمت الاستعادة من الملف ✅"})
+
+@app.post("/api/admin/password")
+@require_admin
+def adm_password():
+    b = request.get_json(force=True, silent=True) or {}
+    cur, new = b.get("current") or "", b.get("new") or ""
+    if len(new) < 8: return jsonify({"message": "الجديدة 8 أحرف على الأقل"}), 400
+    eff = get_setting("admin_password_hash", "")
+    if eff:
+        ok = check_password_hash(eff, cur)
+    else:
+        ok = hmac.compare_digest(cur, ADMIN_PASSWORD)
+    if not ok: return jsonify({"message": "الحالية غير صحيحة"}), 401
+    set_setting("admin_password_hash", generate_password_hash(new))
+    return jsonify({"message": "تم تغيير كلمة مرور الأدمن ✅ — استخدمها من الآن"})
+
+SNAP_TABLES = ("settings", "sections", "subsections", "products", "skus",
+               "web_users", "balances", "user_tier", "tiers",
+               "deposit_manual", "deposit_auto", "deposit_requests", "orders",
+               "transactions", "notifications", "banners", "web_admins",
+               "bot_admins", "providers", "category_links", "referrals")
+
+def _table_cols(db, table):
+    try:
+        if USE_PG:
+            rows = db.execute("SELECT column_name FROM information_schema.columns WHERE table_name=? ORDER BY ordinal_position", (table,)).fetchall()
+        else:
+            rows = db.execute(f"PRAGMA table_info({table})").fetchall()
+            return [r[1] for r in rows]
+        return [r[0] for r in rows]
+    except Exception:
+        return []
+
+def _dump_tables():
+    import json as _j
+    data = {}
+    with get_db() as db:
+        for t in SNAP_TABLES:
+            try:
+                cols = _table_cols(db, t)
+                if not cols: continue
+                rows = db.execute(f"SELECT * FROM {t}").fetchall()
+                data[t] = {"cols": cols, "rows": [[str(v) if isinstance(v, (datetime,)) else v for v in r] for r in rows]}
+            except Exception:
+                continue
+    return data
+
+def _restore_tables(data):
+    with get_db() as db:
+        for t in SNAP_TABLES:
+            blk = (data or {}).get(t)
+            if not blk: continue
+            cols, rows = blk.get("cols") or [], blk.get("rows") or []
+            if not cols: continue
+            try: db.execute(f"DELETE FROM {t}")
+            except Exception: continue
+            ph = ",".join(["?"] * len(cols))
+            for r in rows:
+                try: db.execute(f"INSERT INTO {t}({','.join(cols)}) VALUES({ph})", tuple(r))
+                except Exception: pass
+
+def _auto_snapshot(reason="auto"):
+    """نسخة أمان تلقائية قبل العمليات الخطرة."""
+    try:
+        import json as _j
+        dump = _j.dumps(_dump_tables(), ensure_ascii=False, default=str)
+        with get_db() as db:
+            sid = f"snap-{reason}-{uuid.uuid4().hex[:6]}"
+            if USE_PG: db.execute("INSERT INTO snapshots(id,reason,payload) VALUES(?,?,?)", (sid, reason, dump))
+            else: db.execute("INSERT INTO snapshots(id,reason,payload) VALUES(?,?,?)", (sid, reason, dump))
+            old = db.execute("SELECT id FROM snapshots ORDER BY created_at DESC").fetchall()
+            for (oid,) in old[5:]: db.execute("DELETE FROM snapshots WHERE id=?", (oid,))
+    except Exception as e:
+        print(f"WARNING: auto snapshot failed: {e}")
 
 # ---------- static ----------
 @app.get("/uploads/<path:f>")

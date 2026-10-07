@@ -19,8 +19,53 @@ const SECTION_LOADERS = {
   "discount-tiers": loadDiscountTiers,
   products: ()=>Promise.all([loadProducts(), loadSections()]),
   "smart-admin": ()=>Promise.all([loadProviders(), loadPricing()]),
-  backup: loadBackups,
+  backup: ()=>Promise.all([loadBackups(), loadSnaps()]),
 };
+async function changeAdminPassword(){
+  const cur = document.getElementById("admCurPw").value, nw = document.getElementById("admNewPw").value;
+  if(!cur || nw.length < 8){ toast("أدخل الحالية والجديدة (8+ أحرف)", "error"); return; }
+  try{
+    const r = await adminFetch("/admin/password", { method:"POST", body: JSON.stringify({ current: cur, new: nw }) });
+    toast(r.message); document.getElementById("admCurPw").value = ""; document.getElementById("admNewPw").value = "";
+  }catch(err){ toast(err.message, "error"); }
+}
+async function loadSnaps(){
+  const body = document.getElementById("snapsTableBody");
+  if(!body) return;
+  try{
+    const data = await adminFetch("/admin/snapshots");
+    body.innerHTML = data.map(s=>`<tr><td>${s.reason}</td><td>${s.created_at}</td><td>${s.size_kb} KB</td>
+      <td class="row-actions"><button class="btn-sm primary" onclick="restoreSnap('${s.id}')">استرجاع</button>
+      <button class="btn-sm danger" onclick="deleteSnap('${s.id}')">حذف</button></td></tr>`).join("")
+      || `<tr><td colspan="4">لا توجد نسخ تلقائية بعد</td></tr>`;
+  }catch(err){ body.innerHTML = `<tr><td colspan="4">${err.message}</td></tr>`; }
+}
+async function restoreSnap(id){
+  if(!confirm("استرجاع هذه النسخة؟ سيتم استبدال البيانات الحالية.")) return;
+  try{ const r = await adminFetch(`/admin/snapshots/${encodeURIComponent(id)}/restore`, { method:"POST" }); toast(r.message); setTimeout(()=>location.reload(), 1000); }
+  catch(err){ toast(err.message, "error"); }
+}
+async function deleteSnap(id){
+  try{ await adminFetch(`/admin/snapshots/${encodeURIComponent(id)}`, { method:"DELETE" }); loadSnaps(); }
+  catch(err){ toast(err.message, "error"); }
+}
+function downloadJsonBackup(){
+  const token = localStorage.getItem("admin_token") || "";
+  const a = document.createElement("a");
+  a.href = "/api/admin/backup-json?token=" + encodeURIComponent(token);
+  a.download = "arab-store-backup.json";
+  document.body.appendChild(a); a.click(); a.remove();
+  toast("جاري تنزيل النسخة…");
+}
+async function restoreJsonBackup(input){
+  const f = input.files && input.files[0];
+  if(!f) return;
+  if(!confirm("استرجاع هذا الملف؟ سيتم استبدال البيانات الحالية (تُؤخذ نسخة أمان أولاً).")){ input.value=""; return; }
+  const fd = new FormData(); fd.append("file", f);
+  try{ const r = await adminFetch("/admin/restore-json", { method:"POST", body: fd }); toast(r.message); setTimeout(()=>location.reload(), 1200); }
+  catch(err){ toast(err.message, "error"); }
+  input.value = "";
+}
 
 function goSection(name, navEl){
   document.querySelectorAll(".admin-section").forEach(s=>s.classList.remove("active"));

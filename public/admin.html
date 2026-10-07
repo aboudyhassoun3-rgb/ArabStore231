@@ -279,6 +279,13 @@
           <input type="email" id="newWebAdminEmail" placeholder="example@email.com" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);">
           <button class="btn btn-primary" onclick="addWebAdmin()"><i class="fa-solid fa-user-plus"></i> منح صلاحية أدمن</button>
         </div>
+        <div class="panel-head" style="margin-top:14px;"><h3><i class="fa-solid fa-key"></i> تغيير كلمة مرور الأدمن</h3></div>
+        <p style="font-size:12px; color:var(--muted); margin:0 0 10px;">بدّلها من الافتراضية لكلمة خاصة بك (8 أحرف على الأقل) حتى لا يستطيع أحد الدخول للوحة.</p>
+        <div class="admin-fields-grid">
+          <input type="password" id="admCurPw" placeholder="الحالية" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);">
+          <input type="password" id="admNewPw" placeholder="الجديدة (8+ أحرف)" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);">
+          <button class="btn btn-primary" onclick="changeAdminPassword()"><i class="fa-solid fa-check"></i> تغيير</button>
+        </div>
       </div>
     </section>
 
@@ -599,10 +606,21 @@
         <p style="font-size:12px; color:var(--muted); margin:0 0 10px;">
           النسخة بتحفظ كل شي (المستخدمون، الأرصدة، الطلبات، المنتجات، الإعدادات). فيك تنزّلها على جهازك أو ترجعها وقت ما بدك.
         </p>
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:10px;">
+          <button class="btn-sm" onclick="downloadJsonBackup(this)"><i class="fa-solid fa-download"></i> تنزيل نسخة JSON (تعمل على كل الاستضافات)</button>
+          <label class="btn-sm" style="cursor:pointer;"><i class="fa-solid fa-upload"></i> استرجاع JSON<input type="file" id="jsonRestoreInput" accept=".json" style="display:none" onchange="restoreJsonBackup(this)"></label>
+        </div>
         <div class="table-scroll">
           <table class="data-table">
             <thead><tr><th>الملف</th><th>الحجم</th><th>التاريخ</th><th>إجراءات</th></tr></thead>
             <tbody id="backupsTableBody"><tr><td colspan="4">...</td></tr></tbody>
+          </table>
+        </div>
+        <div class="panel-head" style="margin-top:10px;"><h3>نسخ الأمان التلقائية</h3></div>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead><tr><th>السبب</th><th>التاريخ</th><th>الحجم</th><th>إجراءات</th></tr></thead>
+            <tbody id="snapsTableBody"><tr><td colspan="4">...</td></tr></tbody>
           </table>
         </div>
       </div>
