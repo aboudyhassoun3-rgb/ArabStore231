@@ -1,0 +1,5 @@
+Flask>=3.0
+Flask-Limiter>=3.5
+gunicorn>=21.2
+requests>=2.31
+psycopg[binary]>=3.2,<4
