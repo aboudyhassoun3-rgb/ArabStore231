@@ -324,7 +324,9 @@ def notify(user_id, title, msg="", kind="info"):
 def issue_token(web_id, admin=False, owner=False):
     tok = secrets.token_urlsafe(32)
     with get_db() as db:
-        try: db.execute("DELETE FROM auth_tokens WHERE created_at < datetime('now','-60 days')")
+        try:
+            cutoff = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d %H:%M:%S")
+            db.execute("DELETE FROM auth_tokens WHERE created_at < ?", (cutoff,))
         except Exception: pass
         db.execute("INSERT INTO auth_tokens(token,web_id,is_admin,is_owner) VALUES(?,?,?,?)",
                    (tok, web_id if not admin else None, 1 if admin else 0, 1 if owner else 0))
@@ -1505,9 +1507,11 @@ def adm_profits():
     end = request.args.get("end") or ""
     cond, params = "status='completed'", []
     if start:
-        cond += " AND date(created_at)>=date(?)"; params.append(start)
+        cond += " AND created_at::date>=?::date" if USE_PG else " AND date(created_at)>=date(?)"
+        params.append(start)
     if end:
-        cond += " AND date(created_at)<=date(?)"; params.append(end)
+        cond += " AND created_at::date<=?::date" if USE_PG else " AND date(created_at)<=date(?)"
+        params.append(end)
     with get_db() as db:
         try:
             rows = db.execute(f"SELECT id,kind,product,sku,price_usd,cost_usd,created_at FROM orders WHERE {cond} ORDER BY id DESC LIMIT 500", params).fetchall()
@@ -1686,6 +1690,29 @@ def alerts_count():
         except Exception: un = 0
     return jsonify({"total": int(pd) + int(po) + int(un), "pending_deposits": pd,
                     "pending_orders": po, "pending_shop_orders": po, "unread": un})
+
+@app.get("/api/admin/db-status")
+@require_admin
+def adm_db_status():
+    import time as _t
+    info = {"pg": USE_PG, "mode": "persistent-postgres" if USE_PG else "ephemeral-sqlite (data will be lost on redeploy)"}
+    t0 = _t.time()
+    try:
+        with get_db() as db:
+            tables = {}
+            for tbl in ("web_users", "sections", "products", "skus", "orders",
+                        "deposit_requests", "balances", "notifications"):
+                try:
+                    tables[tbl] = db.execute(f"SELECT COUNT(*) FROM {tbl}").fetchone()[0]
+                except Exception as e:
+                    tables[tbl] = f"missing: {e}"
+            info["tables"] = tables
+        info["connect_ms"] = round((_t.time() - t0) * 1000)
+        info["status"] = "ok"
+    except Exception as e:
+        info["status"] = "CONNECTION FAILED"
+        info["error"] = str(e)[:500]
+    return jsonify(info)
 
 @app.post("/api/admin/settings/notify-test")
 @require_admin
