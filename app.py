@@ -318,14 +318,54 @@ def notify(user_id, title, msg="", kind="info"):
     with get_db() as db:
         db.execute("INSERT INTO notifications(user_id,title,message,kind) VALUES(?,?,?,?)", (user_id, title, msg, kind))
 
+# ---------- الجلسات في قاعدة البيانات (تعمل على كل النسخ حتى بدون ARAB_SECRET_KEY) ----------
+def issue_token(web_id, admin=False, owner=False):
+    tok = secrets.token_urlsafe(32)
+    with get_db() as db:
+        try: db.execute("DELETE FROM auth_tokens WHERE created_at < datetime('now','-60 days')")
+        except Exception: pass
+        db.execute("INSERT INTO auth_tokens(token,web_id,is_admin,is_owner) VALUES(?,?,?,?)",
+                   (tok, web_id if not admin else None, 1 if admin else 0, 1 if owner else 0))
+    return tok
+
+def revoke_token(tok):
+    try:
+        with get_db() as db: db.execute("DELETE FROM auth_tokens WHERE token=?", (tok,))
+    except Exception: pass
+
+def token_to_web(tok):
+    """يرجع web_id أو None. يدعم توكنات DB الجديدة والقديمة الموقّعة."""
+    if not tok: return None
+    try:
+        with get_db() as db:
+            r = db.execute("SELECT web_id FROM auth_tokens WHERE token=? AND (is_admin=0 OR is_admin IS NULL)", (tok,)).fetchone()
+        if r and r[0] is not None: return int(r[0])
+    except Exception: pass
+    try:
+        return int(user_ser.loads(tok, max_age=TOKEN_AGE).get("web_id"))
+    except Exception: return None
+
+def token_to_admin(tok):
+    """يرجع payload الأدمن أو None."""
+    if not tok: return None
+    try:
+        with get_db() as db:
+            r = db.execute("SELECT is_owner FROM auth_tokens WHERE token=? AND is_admin=1", (tok,)).fetchone()
+        if r: return {"owner": bool(r[0])}
+    except Exception: pass
+    try:
+        return admin_ser.loads(tok, max_age=90 * 24 * 60 * 60)
+    except Exception: return None
+
 def require_auth(f):
     @wraps(f)
     def w(*a, **kw):
         h = request.headers.get("Authorization", "")
         if not h.startswith("Bearer "): return jsonify({"message": "سجّل دخولك أولاً"}), 401
-        try: data = user_ser.loads(h[7:], max_age=TOKEN_AGE)
-        except (BadSignature, SignatureExpired): return jsonify({"message": "انتهت الجلسة"}), 401
-        u = get_web_by_id(data.get("web_id"))
+        wid = token_to_web(h[7:])
+        if not wid:
+            return jsonify({"message": "انتهت الجلسة، سجّل دخولك من جديد"}), 401
+        u = get_web_by_id(wid)
         if not u: return jsonify({"message": "الحساب غير موجود"}), 401
         request.wu = u; return f(*a, **kw)
     return w
@@ -333,9 +373,8 @@ def require_auth(f):
 def optional_user():
     h = request.headers.get("Authorization", "")
     if not h.startswith("Bearer "): return None
-    try: data = user_ser.loads(h[7:], max_age=TOKEN_AGE)
-    except Exception: return None
-    return get_web_by_id(data.get("web_id"))
+    wid = token_to_web(h[7:])
+    return get_web_by_id(wid) if wid else None
 
 def require_admin(f):
     @wraps(f)
@@ -343,8 +382,8 @@ def require_admin(f):
         h = request.headers.get("Authorization", "")
         token = h[7:] if h.startswith("Bearer ") else (request.args.get("token", "") or "")
         if not token: return jsonify({"message": "دخول غير مصرح"}), 401
-        try: p = admin_ser.loads(token, max_age=90 * 24 * 60 * 60)
-        except Exception: return jsonify({"message": "دخول غير مصرح"}), 401
+        p = token_to_admin(token)
+        if not p: return jsonify({"message": "دخول غير مصرح"}), 401
         request.ap = p; return f(*a, **kw)
     return w
 
@@ -445,7 +484,13 @@ def register():
         try: db.execute("INSERT INTO referrals(code,owner_id) VALUES(?,?)", (f"REF-{wid}-{secrets.token_hex(2).upper()}", sid))
         except Exception: pass
     u = get_web_by_id(wid)
-    return jsonify({"token": user_ser.dumps({"web_id": wid}), "user": row_to_user_public(u)})
+    return jsonify({"token": issue_token(wid), "user": row_to_user_public(u)})
+
+@app.post("/api/auth/logout")
+def logout():
+    h = request.headers.get("Authorization", "")
+    if h.startswith("Bearer "): revoke_token(h[7:])
+    return jsonify({"message": "تم تسجيل الخروج"})
 
 @app.post("/api/auth/login")
 @limiter.limit("12 per minute")
@@ -461,7 +506,7 @@ def login():
         blocked = None
     if blocked:
         return jsonify({"message": "تم حظر حسابك — تواصل مع الدعم"}), 403
-    return jsonify({"token": user_ser.dumps({"web_id": int(u["id"] if "id" in u.keys() else u[0])}), "user": row_to_user_public(u)})
+    return jsonify({"token": issue_token(int(u["id"] if "id" in u.keys() else u[0])), "user": row_to_user_public(u)})
 
 @app.get("/api/auth/me")
 @require_auth
@@ -856,7 +901,7 @@ def v1_order():
 def alogin():
     b = request.get_json(force=True, silent=True) or {}
     if (b.get("password") or "") != ADMIN_PASSWORD: return jsonify({"message": "كلمة المرور غير صحيحة"}), 401
-    return jsonify({"token": admin_ser.dumps({"owner": True}), "owner": True})
+    return jsonify({"token": issue_token(None, admin=True, owner=True), "owner": True})
 
 @app.get("/api/admin/stats")
 @require_admin
@@ -1502,6 +1547,7 @@ CREATE TABLE IF NOT EXISTS category_links(category_id INTEGER PRIMARY KEY, provi
 CREATE TABLE IF NOT EXISTS import_batches(id TEXT PRIMARY KEY, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, items INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS import_items(batch_id TEXT, kind TEXT, ref_id INTEGER);
 CREATE TABLE IF NOT EXISTS bot_admins(user_id INTEGER PRIMARY KEY);
+CREATE TABLE IF NOT EXISTS auth_tokens(token TEXT PRIMARY KEY, web_id INTEGER, is_admin INTEGER DEFAULT 0, is_owner INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 """
 def ensure_extra():
     with get_db() as db:
@@ -1574,7 +1620,7 @@ def reset_pw():
 def admin_auto():
     email = request.wu["email"] if "email" in request.wu.keys() else request.wu[2]
     if not is_admin(email): return jsonify({"message": "غير مصرح"}), 403
-    return jsonify({"token": admin_ser.dumps({"owner": (email or "").lower() in OWNER_EMAILS}), "owner": (email or "").lower() in OWNER_EMAILS})
+    return jsonify({"token": issue_token(None, admin=True, owner=(email or "").lower() in OWNER_EMAILS), "owner": (email or "").lower() in OWNER_EMAILS})
 
 # --- إشعارات الأدمن + push ---
 @app.get("/api/push/public-key")
@@ -2575,7 +2621,8 @@ def root(): return send_from_directory(app.static_folder, "store.html")
 
 @app.get("/health")
 def health():
-    info = {"ok": True, "pg": USE_PG, "time": datetime.now().isoformat()}
+    info = {"ok": True, "pg": USE_PG, "time": datetime.now().isoformat(),
+            "storage": "persistent-postgres" if USE_PG else "ephemeral (set DATABASE_URL or data will be lost)"}
     try:
         with get_db() as db:
             info["sections"] = db.execute("SELECT COUNT(*) FROM sections").fetchone()[0]

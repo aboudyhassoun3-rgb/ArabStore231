@@ -47,14 +47,23 @@ python app.py
 ### ☁️ النشر على Vercel
 
 1. ارفع المشروع إلى GitHub ثم استورده في Vercel (بدون تعديل أي إعداد — يكتشف كل شيء تلقائياً).
-2. أضف متغيرات البيئة في Vercel → Settings → Environment Variables:
-   - `ARAB_SECRET_KEY` (قيمة عشوائية طويلة — **إجباري**، بدونه لن يعمل الموقع)
+2. (اختياري لكن يُنصح به) أضف متغيرات البيئة في Vercel → Settings → Environment Variables:
+   - `ARAB_SECRET_KEY` (قيمة عشوائية طويلة — لجلسات ثابتة، وإلا يعمل الموقع بمفتاح مؤقت)
    - `ARAB_ADMIN_PASSWORD` (افتراضي: `admin564`)
-   - `DATABASE_URL` (Supabase Postgres — للبيانات الدائمة، بدونه البيانات مؤقتة)
    - `SUPABASE_URL` + `SUPABASE_SERVICE_ROLE_KEY` (لصور دائمة)
    - `ARAB_API_TOKEN` + `ARAB_API_BASE_URL` (مزوّد الشحن — اختياري)
    - `ARAB_VAPID_*` (إشعارات الخلفية — اختياري)
 3. Deploy. ثم تحقق: `https://YOUR-APP.vercel.app/health` يجب أن يرجع `{"ok":true}`.
+
+### 💾 حفظ البيانات نهائياً (مهم — وإلا تُمسح البيانات!)
+
+بدون الخطوات التالية يعمل المتجر على تخزين مؤقت يُمسح مع كل نشر:
+1. افتح **supabase.com** وأنشئ حساباً ومشروعاً جديداً (مجاني).
+2. من لوحة المشروع: **Connect** ← انسخ رابط **Pooler** (المنفذ 6543) وضع كلمة مرور قاعدة البيانات فيه.
+3. في Vercel أضف متغير `DATABASE_URL` بهذا الرابط وأعد النشر.
+4. تحقق من `https://YOUR-APP.vercel.app/health` — يجب أن يظهر `"storage":"persistent-postgres"`.
+
+> تسجيل الدخول يعمل على كل النسخ تلقائياً بدون أي إعداد (الجلسات محفوظة في قاعدة البيانات).
 
 #### 🛠️ ظهر لك 404 NOT_FOUND؟
 
