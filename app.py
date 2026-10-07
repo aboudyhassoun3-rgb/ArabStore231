@@ -27,9 +27,10 @@ USE_PG = bool(DATABASE_URL)
 
 SECRET_KEY = os.environ.get("ARAB_SECRET_KEY") or None
 if not SECRET_KEY:
-    if IS_VERCEL:
-        raise RuntimeError("ARAB_SECRET_KEY must be set in Vercel env")
+    # مفتاح مؤقت يعمل فوراً (الجلسات قد تنتهي عند تبدّل النسخ).
+    # للإنتاج اضبط ARAB_SECRET_KEY بقيمة ثابتة في Vercel.
     SECRET_KEY = secrets.token_urlsafe(32)
+    print("WARNING: ARAB_SECRET_KEY not set — using ephemeral key. Set it in Vercel env for stable sessions.")
 ADMIN_PASSWORD = os.environ.get("ARAB_ADMIN_PASSWORD") or "admin564"
 
 PROVIDER_TOKEN = os.environ.get("ARAB_API_TOKEN", "").strip()
@@ -236,9 +237,14 @@ def seed(db):
     db.execute("INSERT INTO deposit_manual(title,description,code) VALUES(?,?,?)",
                ("شام كاش يدوي", "حوّل ثم أرسل كود العملية", "sham"))
     db.execute("INSERT INTO deposit_auto(title,description,code,gateway) VALUES(?,?,?,?)",
-               ("تحقق تلقائي", "إيداع فوري عبر كود العملية", "auto", "verify"))
+                ("تحقق تلقائي", "إيداع فوري عبر كود العملية", "auto", "verify"))
 
-init_db()
+try:
+    init_db()
+except Exception as e:
+    # لا نمنع إقلاع التطبيق (مثلاً DATABASE_URL خاطئ) — تُسجّل المشكلة
+    # وتظهر عبر /health، والصفحات الثابتة تستمر بالعمل.
+    print(f"WARNING: init_db failed: {e}")
 
 # ---------- helpers ----------
 def get_setting(k, d=""):
@@ -1502,7 +1508,10 @@ def ensure_extra():
         for stmt in [s for s in EXTRA_SCHEMA.split(";") if s.strip()]:
             try: db.execute(stmt)
             except Exception: pass
-ensure_extra()
+try:
+    ensure_extra()
+except Exception as e:
+    print(f"WARNING: ensure_extra failed: {e}")
 
 def _key_user_client():
     key = request.headers.get("api-token") or request.headers.get("X-Api-Key") or request.args.get("api_key") or ""
@@ -2565,7 +2574,15 @@ def mani():
 def root(): return send_from_directory(app.static_folder, "store.html")
 
 @app.get("/health")
-def health(): return jsonify({"ok": True, "pg": USE_PG, "time": datetime.now().isoformat()})
+def health():
+    info = {"ok": True, "pg": USE_PG, "time": datetime.now().isoformat()}
+    try:
+        with get_db() as db:
+            info["sections"] = db.execute("SELECT COUNT(*) FROM sections").fetchone()[0]
+        info["db"] = "ok"
+    except Exception as e:
+        info["db"] = f"error: {e}"
+    return jsonify(info)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 5000)), debug=True)
