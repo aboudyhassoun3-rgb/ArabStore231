@@ -2807,27 +2807,57 @@ def ai_gen():
     b = request.get_json(force=True, silent=True) or {}
     name = b.get("name") or b.get("product", "store banner")
     url, key = (get_setting("ai_image_api_url", "") or "").strip(), (get_setting("ai_image_api_key", "") or "").strip()
+    err_detail = ""
     if url and key:
-        # التوليد عبر API الخارجي — أي فشل يُعرض رسالته الحقيقية بدل التوليد الصامت
+        # التوليد عبر API الخارجي أولاً
         prompt = (b.get("prompt") or get_setting("ai_image_prompt_template", "")).replace("{product}", name)
         try:
             import requests as _rq
             r = _rq.post(url, json={"prompt": prompt, "key": key}, timeout=25)
+            ok, img, err_detail = _extract_ai_image(r)
+            if ok:
+                return jsonify({"message": "تم التوليد عبر API ✅", "image": img, "url": img})
         except Exception as e:
-            return jsonify({"message": f"تعذّر الاتصال بخدمة توليد الصور: {e}"}), 502
-        if not r.ok:
-            return jsonify({"message": f"خدمة توليد الصور رفضت الطلب (رمز {r.status_code}): {r.text[:300]}"}), 502
-        try:
-            d = r.json()
-        except Exception:
-            return jsonify({"message": "خدمة توليد الصور أرجعت رداً غير صالح (ليس JSON)"}), 502
-        img = (d.get("image_url") or d.get("image") or d.get("url") or "").strip() if isinstance(d, dict) else ""
-        if not img:
-            return jsonify({"message": "خدمة توليد الصور لم تُرجع أي صورة في الرد"}), 502
-        return jsonify({"message": "تم التوليد عبر API ✅", "image": img, "url": img})
+            err_detail = f"تعذّر الاتصال بخدمة توليد الصور: {e}"
+    # fallback: توليد محلي بهوية المتجر حتى لا يبقى المستخدم بلا صورة
+    # (مع إظهار سبب فشل المحرك الخارجي إن وُجد)
     img = branded_image_url(name)
-    if not img: return jsonify({"message": "تعذّر التوليد"}), 502
-    return jsonify({"message": "تم التوليد بهوية المتجر ✅ (لا يوجد API خارجي مضبوط)", "image": img, "url": img})
+    if not img:
+        return jsonify({"message": err_detail or "تعذّر التوليد"}), 502
+    if err_detail:
+        msg = f"المحرك الخارجي فشل ({err_detail}) — تم التوليد بهوية المتجر بدلاً منه ✅"
+    else:
+        msg = "تم التوليد بهوية المتجر ✅ (لا يوجد API خارجي مضبوط)"
+    return jsonify({"message": msg, "image": img, "url": img, "fallback": bool(err_detail)})
+
+
+def _extract_ai_image(r):
+    """يستخرج رابط الصورة من رد خدمة التوليد بصيغ متعددة.
+    يرجع (نجح؟, الرابط, وصف الخطأ)."""
+    if not r.ok:
+        return False, "", f"رفضت الطلب (رمز {r.status_code}): {(r.text or '')[:300]}"
+    try:
+        d = r.json()
+    except Exception:
+        return False, "", "أرجعت رداً غير صالح (ليس JSON)"
+    for getter in (
+        lambda x: x.get("image_url"), lambda x: x.get("image"), lambda x: x.get("url"),
+        lambda x: (x.get("data") or {}).get("url") if isinstance(x.get("data"), dict) else None,
+        lambda x: (x.get("data") or {}).get("image") if isinstance(x.get("data"), dict) else None,
+        lambda x: (x.get("result") or {}).get("url") if isinstance(x.get("result"), dict) else None,
+        lambda x: (x.get("images") or [None])[0] if isinstance(x.get("images"), list) else None,
+        lambda x: (x.get("output") or [None])[0] if isinstance(x.get("output"), list) else None,
+    ):
+        try:
+            v = getter(d) if isinstance(d, dict) else None
+        except Exception:
+            v = None
+        if isinstance(v, str) and v.strip():
+            return True, v.strip(), ""
+    detail = ""
+    if isinstance(d, dict):
+        detail = str(d.get("detail") or d.get("error") or d.get("message") or "")[:200]
+    return False, "", f"لم تُرجع أي صورة في الرد{(' — ' + detail) if detail else ''}"
 
 @app.post("/api/admin/ai-image/apply")
 @require_admin
