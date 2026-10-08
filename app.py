@@ -51,18 +51,26 @@ UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 def _rate_key():
-    # خلف Vercel يكون remote_addr عنوان البروكسي للجميع — نستخدم أول IP حقيقي
-    # وإلا اجتمع كل المستخدمين في عدّاد واحد وحُظر تسجيل الدخول للجميع.
+    # المستخدم المسجّل يُحاسَب على جلسته لا على IP الشبكة — وإلا حظر مشتركو
+    # نفس شبكة الهاتف (CGNAT) بعضهم بعضاً تحت الضغط. بدون DB، من نص التوكن.
+    h = request.headers.get("Authorization", "")
+    if h.startswith("Bearer ") and len(h) > 14:
+        return "tok:" + h[7:23]
     fwd = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
-    return fwd or get_remote_address()
+    return "ip:" + (fwd or get_remote_address())
 
 limiter = Limiter(key_func=_rate_key, app=app,
-                  default_limits=["300 per hour", "60 per minute"], storage_uri="memory://")
+                  default_limits=["600 per hour", "120 per minute"], storage_uri="memory://")
+
+@app.errorhandler(429)
+def _ratelimit_json(e):
+    # مهم: الواجهة تتوقع JSON دائماً — بدونه تظهر رسالة "حدث خطأ" العامة.
+    return jsonify({"message": "طلبات كثيرة بسرعة ⏳ انتظر قليلاً ثم حاول مجدداً"}), 429
 
 # ---------- db layer ----------
 def _pg_conn():
     import psycopg
-    return psycopg.connect(DATABASE_URL)
+    return psycopg.connect(DATABASE_URL, connect_timeout=8)
 
 def _lite_conn():
     p = os.path.join(DATA_DIR, "store.db")
@@ -208,6 +216,25 @@ def init_db():
                     "ALTER TABLE web_admins ADD COLUMN added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"]:
             try: db.execute(mig)
             except Exception: pass
+        # فهارس للأعمدة الساخنة — ضرورية مع آلاف الحسابات والمنتجات.
+        for idx in [
+            "CREATE INDEX IF NOT EXISTS idx_web_users_email ON web_users(email)",
+            "CREATE INDEX IF NOT EXISTS idx_web_users_site ON web_users(site_user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_auth_tokens_token ON auth_tokens(token)",
+            "CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)",
+            "CREATE INDEX IF NOT EXISTS idx_orders_uuid ON orders(order_uuid)",
+            "CREATE INDEX IF NOT EXISTS idx_deposit_user ON deposit_requests(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_deposit_status ON deposit_requests(status)",
+            "CREATE INDEX IF NOT EXISTS idx_tx_user ON transactions(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id)",
+            "CREATE INDEX IF NOT EXISTS idx_products_cat ON products(category)",
+            "CREATE INDEX IF NOT EXISTS idx_skus_prod ON skus(product_id)",
+            "CREATE INDEX IF NOT EXISTS idx_links_prov ON category_links(provider_id, provider_product)",
+            "CREATE INDEX IF NOT EXISTS idx_ref_owner ON referrals(owner_id)",
+        ]:
+            try: db.execute(idx)
+            except Exception: pass
         # settings defaults
         defaults = {"exchange_rate": "13800", "support_username": "aboudy2312",
                     "support_telegram": "https://t.me/aboudy2312", "support_whatsapp": "",
@@ -256,15 +283,27 @@ except Exception as e:
     print(f"WARNING: init_db failed: {e}")
 
 # ---------- helpers ----------
+_SETTINGS_CACHE = {"at": 0, "data": {}}
+_SETTINGS_TTL = 30  # ثانية — الإعدادات تتغير نادراً، والكاش يلغي اتصال DB عن كل طلب
+
 def get_setting(k, d=""):
+    now = time.time()
+    hit = _SETTINGS_CACHE["data"].get(k)
+    if hit is not None and now - _SETTINGS_CACHE["at"] < _SETTINGS_TTL:
+        return hit
     with get_db() as db:
         r = db.execute("SELECT value FROM settings WHERE key=?", (k,)).fetchone()
-        return (r[0] if r else d)
+        v = (r[0] if r else d)
+    _SETTINGS_CACHE["data"][k] = v
+    _SETTINGS_CACHE["at"] = now
+    return v
 
 def set_setting(k, v):
     with get_db() as db:
         if USE_PG: db.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (k, v))
         else: db.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", (k, v))
+    _SETTINGS_CACHE["data"][k] = v
+    _SETTINGS_CACHE["at"] = time.time()
 
 def rate(): return float(get_setting("exchange_rate", "13800") or 13800)
 
@@ -479,7 +518,7 @@ def _maint():
 
 # ================= AUTH =================
 @app.post("/api/auth/register")
-@limiter.limit("8 per hour")
+@limiter.limit("20 per hour")
 def register():
     b = request.get_json(force=True, silent=True) or {}
     name, email, pw = (b.get("name") or "").strip(), (b.get("email") or "").strip().lower(), b.get("password") or ""
@@ -2150,8 +2189,9 @@ def adm_prov_import(pid):
             name, price = it.get("name", "منتج"), float(it.get("price") or 0)
             cur = db.execute("INSERT INTO products(name,category,emoji,image,public_id) VALUES(?,?,?,?,?) RETURNING id" if USE_PG
                              else "INSERT INTO products(name,category,emoji,image,public_id) VALUES(?,?,?,?,?)",
-                             (name, "مستورد", "📦", branded_image_url(name), str(secrets.randbelow(90000) + 10000)))
+                             (name, "مستورد", "📦", "", str(secrets.randbelow(90000) + 10000)))
             newpid = cur.fetchone()[0] if USE_PG else cur.lastrowid
+            db.execute("UPDATE products SET image=? WHERE id=?", (f"/brand/{newpid}.svg", newpid))
             db.execute("INSERT INTO skus(product_id,name,price,cost,public_id) VALUES(?,?,?,?,?)",
                        (newpid, name, round(price * (1 + margin / 100), 4), price, str(secrets.randbelow(90000) + 10000)))
             n += 1
@@ -2261,11 +2301,11 @@ def adm_csv():
                     continue
             p = db.execute("SELECT id FROM products WHERE name=?", (pname,)).fetchone()
             if not p:
-                img = branded_image_url(pname)
                 cur = db.execute("INSERT INTO products(name,category,emoji,image,public_id) VALUES(?,?,?,?,?) RETURNING id" if USE_PG
                                  else "INSERT INTO products(name,category,emoji,image,public_id) VALUES(?,?,?,?,?)",
-                                 (pname, cat, "📦", img, str(secrets.randbelow(90000) + 10000)))
+                                 (pname, cat, "📦", "", str(secrets.randbelow(90000) + 10000)))
                 newpid = cur.fetchone()[0] if USE_PG else cur.lastrowid
+                db.execute("UPDATE products SET image=? WHERE id=?", (f"/brand/{newpid}.svg", newpid))
                 created.append(("product", newpid))
                 p = (newpid,)
             if db.execute("SELECT 1 FROM skus WHERE product_id=? AND name=?", (p[0], sname)).fetchone():
@@ -2378,11 +2418,11 @@ def adm_prov_import_file():
             sections_used.add(secname)
             p = db.execute("SELECT id FROM products WHERE name=?", (name,)).fetchone()
             if not p:
-                img = branded_image_url(name, _brand_store)
                 cur = db.execute("INSERT INTO products(name,category,emoji,image,public_id) VALUES(?,?,?,?,?) RETURNING id" if USE_PG
                                  else "INSERT INTO products(name,category,emoji,image,public_id) VALUES(?,?,?,?,?)",
-                                 (name, secname, emo, img, str(secrets.randbelow(90000) + 10000)))
+                                 (name, secname, emo, "", str(secrets.randbelow(90000) + 10000)))
                 newpid = cur.fetchone()[0] if USE_PG else cur.lastrowid
+                db.execute("UPDATE products SET image=? WHERE id=?", (f"/brand/{newpid}.svg", newpid))
                 p = (newpid,)
             sell = cost * (1 + margin / 100)
             sell = round(sell, 2) if sell >= 1 else round(sell, 4)
@@ -2470,14 +2510,13 @@ def adm_catalog_clear():
 @app.post("/api/admin/catalog/brand-images")
 @require_admin
 def adm_brand_images():
+    # فوري مهما كان العدد: روابط توليد عند الطلب، بدون ملفات ولا رفع.
     n = 0
     with get_db() as db:
-        rows = db.execute("SELECT id,name FROM products WHERE image IS NULL OR image=''").fetchall()
-        for pid, pname in rows:
-            img = branded_image_url(pname or "منتج")
-            if img:
-                db.execute("UPDATE products SET image=? WHERE id=?", (img, pid))
-                n += 1
+        rows = db.execute("SELECT id FROM products WHERE image IS NULL OR image=''").fetchall()
+        for (pid,) in rows:
+            db.execute("UPDATE products SET image=? WHERE id=?", (f"/brand/{pid}.svg", pid))
+            n += 1
     return jsonify({"message": f"تم توليد صور لـ {n} منتج ✅"})
 
 @app.get("/site-icon")
@@ -2802,6 +2841,23 @@ def _auto_snapshot(reason="auto"):
 @app.get("/uploads/<path:f>")
 def upl(f): return send_from_directory(UPLOAD_DIR, f)
 
+@app.get("/brand/<int:pid>.svg")
+def brand_img(pid):
+    """صورة المنتج التلقائية تُولَّد عند الطلب — بدون أي ملفات مخزنة،
+    تعمل على كل النسخ وتُحفَظ في CDN. الحل للآلاف من الصور."""
+    try:
+        with get_db() as db:
+            r = db.execute("SELECT name FROM products WHERE id=?", (pid,)).fetchone()
+        name = (r[0] if r and r[0] else "منتج")
+        from branding import build_product_svg
+        try: store_name = get_setting("store_name", "ARAB STORE")
+        except Exception: store_name = "ARAB STORE"
+        svg = build_product_svg(name, store_name)
+    except Exception:
+        svg = '<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400"><rect width="600" height="400" fill="#1a2450"/></svg>'
+    return app.response_class(svg, mimetype="image/svg+xml",
+                              headers={"Cache-Control": "public, max-age=86400"})
+
 @app.get("/manifest.json")
 def mani():
     return jsonify({"name": "ARAB STORE", "short_name": "ARAB", "display": "standalone", "dir": "rtl", "lang": "ar",
@@ -2812,8 +2868,12 @@ def root(): return send_from_directory(app.static_folder, "store.html")
 
 @app.get("/health")
 def health():
-    info = {"ok": True, "pg": USE_PG, "time": datetime.now().isoformat(),
-            "storage": "persistent-postgres" if USE_PG else "ephemeral (set DATABASE_URL or data will be lost)"}
+    surl = os.environ.get("SUPABASE_URL", "").strip()
+    skey = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    info = {"ok": True, "pg": USE_PG, "build": "20261008-ratelimit-json",
+            "time": datetime.now().isoformat(),
+            "storage": "persistent-postgres" if USE_PG else "ephemeral (set DATABASE_URL or data will be lost)",
+            "uploads": "supabase" if (surl and skey) else "ephemeral-tmp (set SUPABASE_* or uploaded images may vanish)"}
     try:
         with get_db() as db:
             info["sections"] = db.execute("SELECT COUNT(*) FROM sections").fetchone()[0]
