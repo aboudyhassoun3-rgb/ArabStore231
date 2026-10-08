@@ -1274,17 +1274,35 @@ def adm_secs_ed(sid):
     with get_db() as db:
         cur = db.execute("SELECT name,color,emoji,image,is_active,sort_order FROM sections WHERE id=?", (sid,)).fetchone()
         if not cur: return jsonify({"message": "غير موجود"}), 404
+        new_name = (b.get("name", cur[0]) or "").strip() or cur[0]
+        if new_name != cur[0]:
+            dup = db.execute("SELECT id FROM sections WHERE name=? AND id<>?", (new_name, sid)).fetchone()
+            if dup: return jsonify({"message": "يوجد قسم آخر بهذا الاسم مسبقاً"}), 409
         act = b.get("active", b.get("is_active", bool(cur[4])))
         db.execute("UPDATE sections SET name=?,color=?,emoji=?,image=?,is_active=?,sort_order=? WHERE id=?",
-                   (b.get("name", cur[0]), b.get("color", cur[1]), b.get("emoji", cur[2]),
+                   (new_name, b.get("color", cur[1]), b.get("emoji", cur[2]),
                     b.get("image", cur[3] or ""), 1 if act else 0,
                     int(b.get("sort_order", cur[5] or 0)), sid))
-    return jsonify({"message": "تم الحفظ ✅"})
+        moved = 0
+        if new_name != cur[0]:
+            # المنتجات مرتبطة بالقسم عبر الاسم — انقلها معه حتى لا تضيع عند إعادة التسمية
+            c = db.execute("UPDATE products SET category=? WHERE category=?", (new_name, cur[0]))
+            try: moved = c.rowcount or 0
+            except Exception: moved = 0
+    msg = "تم الحفظ ✅" if new_name == cur[0] else f"تمت إعادة التسمية ونقل {moved} منتج مع القسم ✅"
+    return jsonify({"message": msg})
 
 @app.delete("/api/admin/sections/<int:sid>")
 @require_admin
 def adm_secs_del(sid):
-    with get_db() as db: db.execute("DELETE FROM sections WHERE id=?", (sid,))
+    with get_db() as db:
+        cur = db.execute("SELECT name FROM sections WHERE id=?", (sid,)).fetchone()
+        if not cur: return jsonify({"message": "غير موجود"}), 404
+        np_ = db.execute("SELECT COUNT(*) FROM products WHERE category=?", (cur[0],)).fetchone()[0]
+        ns = db.execute("SELECT COUNT(*) FROM subsections WHERE section_id=?", (sid,)).fetchone()[0]
+        if np_ or ns:
+            return jsonify({"message": f"لا يمكن الحذف: القسم يحتوي {np_} منتج و{ns} قسم فرعي — انقلها أولاً ثم احذف"}), 409
+        db.execute("DELETE FROM sections WHERE id=?", (sid,))
     return jsonify({"message": "تم الحذف"})
 
 @app.get("/api/admin/products")
@@ -1322,12 +1340,28 @@ def adm_prods_add():
 def adm_prods_ed(pid):
     b = request.get_json(force=True, silent=True) or {}
     with get_db() as db:
-        cur = db.execute("SELECT name,category,emoji,description,image,sort_order FROM products WHERE id=?", (pid,)).fetchone()
+        cur = db.execute("SELECT name,category,emoji,description,image,sort_order,subsection_id FROM products WHERE id=?", (pid,)).fetchone()
         if not cur: return jsonify({"message": "غير موجود"}), 404
-        db.execute("UPDATE products SET name=?,category=?,emoji=?,description=?,image=?,sort_order=? WHERE id=?",
-                   (b.get("name", cur[0]), b.get("category", cur[1]), b.get("emoji", cur[2]),
+        new_cat = (b.get("category", cur[1]) or "").strip() or cur[1]
+        sec = db.execute("SELECT id FROM sections WHERE name=?", (new_cat,)).fetchone()
+        if not sec: return jsonify({"message": "القسم غير موجود — أنشئه أولاً ثم انقل المنتج إليه"}), 400
+        raw_sub = b.get("subsection_id", "__keep__")
+        if raw_sub == "__keep__":
+            new_sub = cur[6]
+            if new_sub:
+                ok = db.execute("SELECT 1 FROM subsections WHERE id=? AND section_id=?", (new_sub, sec[0])).fetchone()
+                if not ok: new_sub = None
+        elif raw_sub in (None, "", 0, "0"):
+            new_sub = None
+        else:
+            try: new_sub = int(raw_sub)
+            except (TypeError, ValueError): return jsonify({"message": "القسم الفرعي غير صالح"}), 400
+            ok = db.execute("SELECT 1 FROM subsections WHERE id=? AND section_id=?", (new_sub, sec[0])).fetchone()
+            if not ok: return jsonify({"message": "القسم الفرعي المختار لا ينتمي لهذا القسم"}), 400
+        db.execute("UPDATE products SET name=?,category=?,emoji=?,description=?,image=?,sort_order=?,subsection_id=? WHERE id=?",
+                   (b.get("name", cur[0]), new_cat, b.get("emoji", cur[2]),
                     b.get("description", cur[3] or ""), b.get("image", cur[4] or ""),
-                    int(b.get("sort_order", cur[5] or 0)), pid))
+                    int(b.get("sort_order", cur[5] or 0)), new_sub, pid))
     return jsonify({"message": "تم الحفظ ✅"})
 
 @app.delete("/api/admin/products/<int:pid>")

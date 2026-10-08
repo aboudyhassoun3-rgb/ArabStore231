@@ -300,7 +300,7 @@
         <a class="photo-tile" href="/products.html?section=${encodeURIComponent(s.name)}&section_id=${s.id}">
           <div class="photo-tile-art ${s.image ? '' : v.art}">            ${art}
           </div>
-          <div class="photo-tile-banner">${s.emoji||''} ${s.name}</div>
+          <div class="photo-tile-banner" dir="auto">${s.emoji||''} ${s.name}</div>
         </a>`;
       }).join("");
     }catch(err){

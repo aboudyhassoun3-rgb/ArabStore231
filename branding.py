@@ -99,22 +99,62 @@ def short_name(name, limit=22):
     return name if len(name) <= limit else name[:limit - 1] + "…"
 
 
+def _escape_xml(text):
+    return ((text or "").replace("&", "&amp;").replace("<", "&lt;")
+            .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def wrap_title(name, per_line=16):
+    """يقسّم الاسم على سطرين متوازنين كحد أقصى بدل قصّه."""
+    text = (name or "").strip() or "منتج"
+    if len(text) <= per_line:
+        return [text]
+    words = text.split()
+    if len(words) == 1:
+        return [words[0][:per_line], words[0][per_line:per_line * 2]]
+    # نقطة التقسيم التي توازن طول السطرين
+    best, best_diff, acc = 1, None, 0
+    for i, w in enumerate(words[:-1]):
+        acc += len(w) + 1
+        diff = abs(acc - len(text) / 2)
+        if best_diff is None or diff < best_diff:
+            best, best_diff = i + 1, diff
+    lines = [" ".join(words[:best]), " ".join(words[best:])]
+    # سطر ما زال طويلاً جداً (كلمة مفردة عملاقة): اقسمه قسراً
+    fixed = []
+    for ln in lines:
+        while len(ln) > per_line + 8:
+            fixed.append(ln[:per_line + 8])
+            ln = ln[per_line + 8:]
+        if ln:
+            fixed.append(ln)
+    return fixed[:2] or ["منتج"]
+
+
 def build_product_svg(name, store_name=None):
-    """يرجع نص SVG مكتفي ذاتياً: تدرّج + إيموجي + اسم المنتج + شريط المتجر."""
+    """يرجع نص SVG مكتفي ذاتياً: تدرّج + إيموجي + الاسم (حتى سطرين) + شريط المتجر."""
     c1, c2 = pick_palette(name or "store")
     emo = pick_emoji(name or "")
-    brand = (store_name or STORE_MARK).strip() or STORE_MARK
-    title = short_name(name or "منتج", 24)
+    brand = _escape_xml((store_name or STORE_MARK).strip() or STORE_MARK)
+    lines = [_escape_xml(ln) for ln in wrap_title(name or "منتج")]
     gid = hashlib.md5(((name or "") + c1).encode("utf-8")).hexdigest()[:8]
+    # خط أصغر كلما طال النص، وموضع مرن حسب عدد الأسطر
+    longest = max((len(ln) for ln in lines), default=0)
+    font_size = 46 if longest <= 14 else (40 if longest <= 18 else 34)
+    if len(lines) == 1:
+        title_svg = f'<text x="300" y="275" text-anchor="middle" font-size="{font_size}" font-weight="bold" fill="#ffffff" font-family="Cairo, Tahoma, Arial, sans-serif" filter="url(#sh{gid})">{lines[0]}</text>'
+    else:
+        title_svg = (f'<text x="300" y="248" text-anchor="middle" font-size="{font_size}" font-weight="bold" fill="#ffffff" font-family="Cairo, Tahoma, Arial, sans-serif" filter="url(#sh{gid})">{lines[0]}</text>'
+                     f'<text x="300" y="292" text-anchor="middle" font-size="{font_size}" font-weight="bold" fill="#ffffff" font-family="Cairo, Tahoma, Arial, sans-serif" filter="url(#sh{gid})">{lines[1]}</text>')
     return f"""<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" viewBox="0 0 600 400">
 <defs><linearGradient id="g{gid}" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="{c1}"/><stop offset="1" stop-color="{c2}"/></linearGradient>
 <filter id="sh{gid}" x="-20%" y="-20%" width="140%" height="140%"><feDropShadow dx="0" dy="4" stdDeviation="6" flood-color="#000" flood-opacity="0.45"/></filter></defs>
 <rect width="600" height="400" rx="28" fill="url(#g{gid})"/>
 <circle cx="520" cy="60" r="120" fill="#ffffff" opacity="0.10"/><circle cx="80" cy="340" r="150" fill="#ffffff" opacity="0.08"/><circle cx="500" cy="330" r="60" fill="#000000" opacity="0.12"/>
-<text x="300" y="185" text-anchor="middle" font-size="120" filter="url(#sh{gid})">{emo}</text>
-<text x="300" y="275" text-anchor="middle" font-size="46" font-weight="bold" fill="#ffffff" font-family="Cairo, Tahoma, Arial, sans-serif" filter="url(#sh{gid})">{title}</text>
-<rect x="185" y="310" width="230" height="52" rx="26" fill="#000000" opacity="0.35"/>
-<text x="300" y="345" text-anchor="middle" font-size="26" font-weight="bold" fill="#f6c453" font-family="Arial, sans-serif" letter-spacing="3">★ {brand} ★</text>
+<text x="300" y="175" text-anchor="middle" font-size="110" filter="url(#sh{gid})">{emo}</text>
+{title_svg}
+<rect x="185" y="312" width="230" height="52" rx="26" fill="#000000" opacity="0.35"/>
+<text x="300" y="347" text-anchor="middle" font-size="26" font-weight="bold" fill="#f6c453" font-family="Arial, sans-serif" letter-spacing="3">★ {brand} ★</text>
 </svg>"""
 
 
