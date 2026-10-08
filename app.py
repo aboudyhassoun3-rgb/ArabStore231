@@ -59,10 +59,15 @@ def _rate_key():
 limiter = Limiter(key_func=_rate_key, app=app,
                   default_limits=["300 per hour", "60 per minute"], storage_uri="memory://")
 
+@app.errorhandler(429)
+def _ratelimit_json(e):
+    # مهم: الواجهة تتوقع JSON دائماً — بدونه تظهر رسالة "حدث خطأ" العامة.
+    return jsonify({"message": "طلبات كثيرة بسرعة ⏳ انتظر قليلاً ثم حاول مجدداً"}), 429
+
 # ---------- db layer ----------
 def _pg_conn():
     import psycopg
-    return psycopg.connect(DATABASE_URL)
+    return psycopg.connect(DATABASE_URL, connect_timeout=8)
 
 def _lite_conn():
     p = os.path.join(DATA_DIR, "store.db")
@@ -479,7 +484,7 @@ def _maint():
 
 # ================= AUTH =================
 @app.post("/api/auth/register")
-@limiter.limit("8 per hour")
+@limiter.limit("20 per hour")
 def register():
     b = request.get_json(force=True, silent=True) or {}
     name, email, pw = (b.get("name") or "").strip(), (b.get("email") or "").strip().lower(), b.get("password") or ""
@@ -2812,7 +2817,8 @@ def root(): return send_from_directory(app.static_folder, "store.html")
 
 @app.get("/health")
 def health():
-    info = {"ok": True, "pg": USE_PG, "time": datetime.now().isoformat(),
+    info = {"ok": True, "pg": USE_PG, "build": "20261008-ratelimit-json",
+            "time": datetime.now().isoformat(),
             "storage": "persistent-postgres" if USE_PG else "ephemeral (set DATABASE_URL or data will be lost)"}
     try:
         with get_db() as db:
