@@ -876,6 +876,15 @@ img{ max-width:100%; display:block; }
 .info-banner i{ color:var(--accent); font-size:15px; margin-top:1px; }
 .info-banner b{ color:var(--text); }
 
+/* ملاحظات المنتج — صندوق بارز تحت العنوان */
+.notes-box{
+  display:flex; gap:10px; align-items:flex-start;
+  background:rgba(255,194,75,.09); border:1px solid rgba(255,194,75,.45);
+  border-radius:var(--r-md); padding:12px 13px; margin:12px 0;
+  font-size:12.5px; line-height:1.9; color:var(--text); white-space:pre-line;
+}
+.notes-box i{ color:var(--gold, #ffc24b); font-size:15px; margin-top:3px; flex-shrink:0; }
+
 /* =========================================================
    لوحة تحكم الأدمن
    ========================================================= */

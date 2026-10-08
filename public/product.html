@@ -66,6 +66,11 @@
     <div class="msg">جاري تحميل الفئات...</div>
   </div>
 
+  <div id="productNotes" class="notes-box" style="display:none;">
+    <i class="fa-solid fa-circle-info"></i>
+    <div id="productNotesText"></div>
+  </div>
+
   <div id="purchaseForm" style="display:none;">
     <div class="section-header" style="margin-top:6px;">
       <div class="section-title">المنتجات</div>
@@ -155,6 +160,10 @@
       productImage = product.image || "";
       productEmoji = product.emoji || "";
       document.getElementById("productTitle").textContent = (product.emoji||'') + ' ' + product.name;
+      if(product.notes && product.notes.trim()){
+        document.getElementById("productNotesText").textContent = product.notes.trim();
+        document.getElementById("productNotes").style.display = "flex";
+      }
     }catch(err){ /* العنوان الافتراضي يضل كافي */ }
 
     try{
@@ -299,7 +308,8 @@
         category_id: selected.id, player_id: playerId, qty, currency: Currency.get(),
       })});
       toast("🎉 " + res.message);
-      setTimeout(()=> location.href = "/orders.html", 1200);
+      // توجيه تلقائي لصفحة استلام رد المزوّد (فيها الرقم/الكود عند شراء الأرقام)
+      setTimeout(()=> location.href = res.order_id ? ("/orders.html?view=" + res.order_id) : "/orders.html", 1200);
     }catch(err){
       toast(err.message, "error");
       btn.disabled = false;

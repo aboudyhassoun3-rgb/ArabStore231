@@ -348,11 +348,17 @@
     finally{ btn.disabled=false; btn.innerHTML='<i class="fa-solid fa-rotate"></i> تحديث الحالة'; }
   }
 
-  document.addEventListener("DOMContentLoaded", ()=>{
+  document.addEventListener("DOMContentLoaded", async ()=>{
     if(!Store.token()){ toast("سجّل دخولك لعرض طلباتك","error"); setTimeout(()=>location.href="/login.html",700); return; }
     document.getElementById("dateFrom").addEventListener("change", renderOrders);
     document.getElementById("dateTo").addEventListener("change", renderOrders);
-    loadOrders();
+    await loadOrders();
+    // فتح تفاصيل طلب محدد مباشرة (بعد إتمام الشراء يُوجَّه المستخدم لرد المزوّد)
+    const viewId = new URLSearchParams(location.search).get("view");
+    if(viewId && /^\d+$/.test(viewId)){
+      history.replaceState(null, "", "/orders.html");
+      viewDetail(Number(viewId));
+    }
   });
 </script>
 </body>

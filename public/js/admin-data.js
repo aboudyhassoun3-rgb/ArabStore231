@@ -1387,7 +1387,8 @@ async function openProductEdit(id){
     <div class="field"><label>الاسم</label><input type="text" id="ef_name" value="${escapeHtml(p.name)}" style="${fld}"></div>
     <div class="field"><label>الإيموجي</label><input type="text" id="ef_emoji" value="${escapeHtml(p.emoji||"")}" style="${fld}"></div>
     <div class="field"><label>القسم (النقل لقسم آخر ينقل المنتج معه)</label><select id="ef_category" onchange="loadProductEditSubs()" style="${fld}">${secOpts}</select></div>
-    <div class="field"><label>القسم الفرعي</label><select id="ef_subsection_id" style="${fld}"><option value="">— بدون قسم فرعي —</option></select></div>`;
+    <div class="field"><label>القسم الفرعي</label><select id="ef_subsection_id" style="${fld}"><option value="">— بدون قسم فرعي —</option></select></div>
+    <div class="field"><label>ملاحظات المنتج (تظهر للزبون في صفحة المنتج)</label><textarea id="ef_notes" rows="3" placeholder="مثال: يصلك الرقم خلال دقائق في صفحة الطلب…" style="${fld}width:100%;font-family:inherit;">${escapeHtml(p.notes||"")}</textarea></div>`;
   document.getElementById("editModal").style.display = "flex";
   await loadProductEditSubs(p.subsection_id);
 }
@@ -1418,7 +1419,7 @@ async function saveEdit(){
   if(!editTarget) return;
   const { kind, id } = editTarget;
   const eps = { product:`/admin/products/${id}`, category:`/admin/categories/${id}`, section:`/admin/sections/${id}`, subsection:`/admin/subsections/${id}`, manual_method:`/admin/deposit-methods/manual/${id}`, auto_method:`/admin/deposit-methods/auto/${id}` };
-  const inputs = document.querySelectorAll("#editModalBody input, #editModalBody select");
+  const inputs = document.querySelectorAll("#editModalBody input, #editModalBody select, #editModalBody textarea");
   const b = {};
   inputs.forEach(el=>{
     const k=el.id.replace("ef_","");
