@@ -648,7 +648,7 @@ function renderProductsTable(products){
       <td>
         <button class="btn-sm" onclick="pickImage('product', ${p.id})"><i class="fa-solid fa-camera"></i></button>
         <button class="btn-sm" onclick="openAiImage('product', ${p.id}, '${p.name.replace(/'/g,"")}')" title="إنشاء صورة بالذكاء الاصطناعي"><i class="fa-solid fa-wand-magic-sparkles"></i></button>
-        <button class="btn-sm" onclick="openEdit('product', ${p.id}, '${p.name.replace(/'/g,"")}', {name:'${p.name.replace(/'/g,"")}', emoji:'${p.emoji||''}'})"><i class="fa-solid fa-pen"></i></button>
+        <button class="btn-sm" onclick="openProductEdit(${p.id})"><i class="fa-solid fa-pen"></i></button>
         <button class="btn-sm" onclick="openCategories(${p.id}, '${p.name.replace(/'/g,"")}')">الفئات</button>
         <button class="btn-sm danger" onclick="deleteProduct(${p.id})">حذف</button>
       </td>
@@ -1370,6 +1370,40 @@ async function removeWebAdmin(email){
 
 /* ===== 3) تعديل عام (modal ديناميكي) ===== */
 let editTarget = null;
+function escapeHtml(s){
+  return String(s ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+/* نافذة تعديل المنتج: الاسم + الإيموجي + القسم + القسم الفرعي (للنقل بين الأقسام) */
+async function openProductEdit(id){
+  const p = productsCache.find(x=>x.id===id);
+  if(!p){ toast("المنتج غير موجود", "error"); return; }
+  editTarget = { kind:"product", id };
+  document.getElementById("editModalTitle").textContent = "تعديل: " + p.name;
+  const body = document.getElementById("editModalBody");
+  const fld = "padding:11px;border-radius:11px;border:1px solid var(--border);background:var(--card-soft);color:var(--text);";
+  const secOpts = sectionsCache.map(s=>`<option value="${escapeHtml(s.name)}" ${s.name===p.category?"selected":""}>${escapeHtml(s.name)}</option>`).join("")
+    || `<option value="">لا توجد أقسام</option>`;
+  body.innerHTML = `
+    <div class="field"><label>الاسم</label><input type="text" id="ef_name" value="${escapeHtml(p.name)}" style="${fld}"></div>
+    <div class="field"><label>الإيموجي</label><input type="text" id="ef_emoji" value="${escapeHtml(p.emoji||"")}" style="${fld}"></div>
+    <div class="field"><label>القسم (النقل لقسم آخر ينقل المنتج معه)</label><select id="ef_category" onchange="loadProductEditSubs()" style="${fld}">${secOpts}</select></div>
+    <div class="field"><label>القسم الفرعي</label><select id="ef_subsection_id" style="${fld}"><option value="">— بدون قسم فرعي —</option></select></div>
+    <div class="field"><label>ملاحظات المنتج (تظهر للزبون في صفحة المنتج)</label><textarea id="ef_notes" rows="3" placeholder="مثال: يصلك الرقم خلال دقائق في صفحة الطلب…" style="${fld}width:100%;font-family:inherit;">${escapeHtml(p.notes||"")}</textarea></div>`;
+  document.getElementById("editModal").style.display = "flex";
+  await loadProductEditSubs(p.subsection_id);
+}
+async function loadProductEditSubs(selected){
+  const catEl = document.getElementById("ef_category");
+  const sel = document.getElementById("ef_subsection_id");
+  if(!catEl || !sel) return;
+  const sec = (typeof sectionsCache !== "undefined" ? sectionsCache : []).find(s=>s.name===catEl.value);
+  sel.innerHTML = `<option value="">— بدون قسم فرعي —</option>`;
+  if(!sec) return;
+  try{
+    const subs = await adminFetch(`/admin/sections/${sec.id}/subsections`);
+    sel.innerHTML = `<option value="">— بدون قسم فرعي —</option>` + subs.map(s=>`<option value="${s.id}" ${s.id===(selected??null)?"selected":""}>${escapeHtml(s.name)}</option>`).join("");
+  }catch(err){ /* يبقى خيار "بدون" فقط */ }
+}
 function openEdit(kind, id, title, fields){
   editTarget = { kind, id };
   document.getElementById("editModalTitle").textContent = "تعديل: " + title;
@@ -1385,7 +1419,7 @@ async function saveEdit(){
   if(!editTarget) return;
   const { kind, id } = editTarget;
   const eps = { product:`/admin/products/${id}`, category:`/admin/categories/${id}`, section:`/admin/sections/${id}`, subsection:`/admin/subsections/${id}`, manual_method:`/admin/deposit-methods/manual/${id}`, auto_method:`/admin/deposit-methods/auto/${id}` };
-  const inputs = document.querySelectorAll("#editModalBody input, #editModalBody select");
+  const inputs = document.querySelectorAll("#editModalBody input, #editModalBody select, #editModalBody textarea");
   const b = {};
   inputs.forEach(el=>{
     const k=el.id.replace("ef_","");
@@ -1394,8 +1428,8 @@ async function saveEdit(){
   });
   if("active" in b) b.active = b.active==="1"||b.active===1;
   try{
-    await adminFetch(eps[kind], { method:"PUT", body: JSON.stringify(b) });
-    toast("تم التعديل ✅"); closeEdit();
+    const res = await adminFetch(eps[kind], { method:"PUT", body: JSON.stringify(b) });
+    toast((res && res.message) || "تم التعديل ✅"); closeEdit();
     if(kind==="product") loadProducts();
     if(kind==="category") loadCategories();
     if(kind==="section") loadSections();

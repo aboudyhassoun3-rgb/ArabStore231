@@ -285,7 +285,8 @@ def init_db():
                     "ALTER TABLE skus ADD COLUMN type TEXT DEFAULT 'fixed'",
                     "ALTER TABLE orders ADD COLUMN cost_usd REAL DEFAULT 0",
                     "ALTER TABLE tiers ADD COLUMN sort_order INTEGER DEFAULT 0",
-                    "ALTER TABLE web_admins ADD COLUMN added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"])
+                    "ALTER TABLE web_admins ADD COLUMN added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
+                    "ALTER TABLE products ADD COLUMN notes TEXT DEFAULT ''"])
         # settings defaults
         defaults = {"exchange_rate": "13800", "support_username": "aboudy2312",
                     "support_telegram": "https://t.me/aboudy2312", "support_whatsapp": "",
@@ -812,9 +813,15 @@ def products():
 @app.get("/api/store/product/<int:pid>")
 def product_one(pid):
     with get_db() as db:
-        p = db.execute("SELECT id,name,category,emoji,description,image FROM products WHERE id=?", (pid,)).fetchone()
+        try:
+            p = db.execute("SELECT id,name,category,emoji,description,image,notes FROM products WHERE id=?", (pid,)).fetchone()
+            has_notes = True
+        except Exception:
+            p = db.execute("SELECT id,name,category,emoji,description,image FROM products WHERE id=?", (pid,)).fetchone()
+            has_notes = False
     if not p: return jsonify({"message": "المنتج غير موجود"}), 404
-    return jsonify({"id": p[0], "name": p[1], "category": p[2], "emoji": p[3], "description": p[4] or "", "image": p[5] or ""})
+    return jsonify({"id": p[0], "name": p[1], "category": p[2], "emoji": p[3], "description": p[4] or "", "image": p[5] or "",
+                    "notes": (p[6] if has_notes else "") or ""})
 
 @app.get("/api/store/categories")
 def skus():
@@ -923,10 +930,17 @@ def deposit():
 def _serialize(uid):
     with get_db() as db:
         rows = db.execute("SELECT id,product,sku,price_usd,price_syp,player,qty,status,provider_order,created_at FROM orders WHERE user_id=? ORDER BY id DESC LIMIT 100", (uid,)).fetchall()
-    return [{"id": r[0], "product": r[1], "product_name": r[1], "category": r[2], "category_name": r[2],
-             "price_usd": r[3], "price_syp": r[4], "player": r[5], "player_id": r[5],
-             "qty": r[6], "status": r[7], "raw_status": r[7], "source": "shop",
-             "provider_order": r[8], "date": str(r[9]), "created_at": str(r[9])} for r in rows]
+    out = []
+    for r in rows:
+        po = r[8] or ""
+        via = bool(po) and not str(po).startswith("LOCAL-")
+        raw = r[7]
+        mapped = "accepted" if raw == "completed" else ("rejected" if raw == "failed" else "pending")
+        out.append({"id": r[0], "product": r[1], "product_name": r[1], "category": r[2], "category_name": r[2],
+                 "price_usd": r[3], "price_syp": r[4], "player": r[5], "player_id": r[5],
+                 "qty": r[6], "status": mapped, "raw_status": raw, "source": "api" if via else "shop",
+                 "provider_order": po, "date": str(r[9]), "created_at": str(r[9])})
+    return out
 
 @app.get("/api/orders")
 @require_auth
@@ -975,20 +989,49 @@ def order_create():
 def order_refresh(oid):
     uid = int(request.wu["site_user_id"] if "site_user_id" in request.wu.keys() else request.wu[4])
     with get_db() as db:
-        o = db.execute("SELECT provider_order FROM orders WHERE id=? AND user_id=?", (oid, uid)).fetchone()
+        o = db.execute("SELECT provider_order,status,price_syp FROM orders WHERE id=? AND user_id=?", (oid, uid)).fetchone()
         if not o: return jsonify({"message": "الطلب غير موجود"}), 404
         st = provider_status(o[0])
+        if st == o[1]:
+            return jsonify({"status": st, "changed": False})
         db.execute("UPDATE orders SET status=? WHERE id=?", (st, oid))
-    return jsonify({"status": st})
+        if st == "failed":
+            # استرجاع الرصيد مرة واحدة عند أول تحوّل للفشل
+            try: db.execute("UPDATE balances SET balance=balance+? WHERE user_id=?", (int(o[2] or 0), uid))
+            except Exception: pass
+            try: db.execute("INSERT INTO transactions(user_id,type,amount,note) VALUES(?, 'in', ?, ?)", (uid, int(o[2] or 0), f"استرجاع رصيد طلب فاشل #{oid}"))
+            except Exception: pass
+            notify(uid, "❌ فشل الطلب", f"تم استرجاع {int(o[2] or 0):,} ل.س إلى رصيدك", "error")
+    return jsonify({"status": st, "changed": True})
+
+def _order_source(provider_order):
+    """api إذا نُفّذ عبر مزوّد حقيقي (له رد يُعرض)، وإلا shop."""
+    po = str(provider_order or "")
+    return "api" if (po and not po.startswith("LOCAL-")) else "shop"
 
 @app.get("/api/orders/<int:oid>/detail")
 @require_auth
 def order_detail(oid):
     uid = int(request.wu["site_user_id"] if "site_user_id" in request.wu.keys() else request.wu[4])
     with get_db() as db:
-        o = db.execute("SELECT id,product,sku,price_usd,price_syp,player,qty,status,created_at FROM orders WHERE id=? AND user_id=?", (oid, uid)).fetchone()
+        o = db.execute("SELECT id,product,sku,price_usd,price_syp,player,qty,status,provider_order,response,created_at FROM orders WHERE id=? AND user_id=?", (oid, uid)).fetchone()
     if not o: return jsonify({"message": "الطلب غير موجود"}), 404
-    return jsonify({"id": o[0], "product": o[1], "category": o[2], "price_usd": o[3], "price_syp": o[4], "player": o[5], "qty": o[6], "status": o[7], "date": str(o[8])})
+    raw = o[7]
+    status = "accepted" if raw == "completed" else ("rejected" if raw == "failed" else "pending")
+    porder = o[8] or ""
+    via_provider = _order_source(porder) == "api"
+    return jsonify({"id": o[0],
+                    "product_name": o[1], "product": o[1],
+                    "category_name": o[2], "category": o[2],
+                    "qty": o[6], "price_usd": o[3], "price_syp": o[4],
+                    "date": str(o[10]), "created_at": str(o[10]),
+                    "player_id": o[5], "player": o[5],
+                    "raw_status": raw, "status": status,
+                    "source": "api" if via_provider else "shop",
+                    "ext_order_id": porder if via_provider else "",
+                    "provider_order": porder,
+                    "api_response": o[9] or "",
+                    "response_time_text": ""})
 
 @app.get("/api/user/activity")
 @require_auth
@@ -1274,17 +1317,35 @@ def adm_secs_ed(sid):
     with get_db() as db:
         cur = db.execute("SELECT name,color,emoji,image,is_active,sort_order FROM sections WHERE id=?", (sid,)).fetchone()
         if not cur: return jsonify({"message": "غير موجود"}), 404
+        new_name = (b.get("name", cur[0]) or "").strip() or cur[0]
+        if new_name != cur[0]:
+            dup = db.execute("SELECT id FROM sections WHERE name=? AND id<>?", (new_name, sid)).fetchone()
+            if dup: return jsonify({"message": "يوجد قسم آخر بهذا الاسم مسبقاً"}), 409
         act = b.get("active", b.get("is_active", bool(cur[4])))
         db.execute("UPDATE sections SET name=?,color=?,emoji=?,image=?,is_active=?,sort_order=? WHERE id=?",
-                   (b.get("name", cur[0]), b.get("color", cur[1]), b.get("emoji", cur[2]),
+                   (new_name, b.get("color", cur[1]), b.get("emoji", cur[2]),
                     b.get("image", cur[3] or ""), 1 if act else 0,
                     int(b.get("sort_order", cur[5] or 0)), sid))
-    return jsonify({"message": "تم الحفظ ✅"})
+        moved = 0
+        if new_name != cur[0]:
+            # المنتجات مرتبطة بالقسم عبر الاسم — انقلها معه حتى لا تضيع عند إعادة التسمية
+            c = db.execute("UPDATE products SET category=? WHERE category=?", (new_name, cur[0]))
+            try: moved = c.rowcount or 0
+            except Exception: moved = 0
+    msg = "تم الحفظ ✅" if new_name == cur[0] else f"تمت إعادة التسمية ونقل {moved} منتج مع القسم ✅"
+    return jsonify({"message": msg})
 
 @app.delete("/api/admin/sections/<int:sid>")
 @require_admin
 def adm_secs_del(sid):
-    with get_db() as db: db.execute("DELETE FROM sections WHERE id=?", (sid,))
+    with get_db() as db:
+        cur = db.execute("SELECT name FROM sections WHERE id=?", (sid,)).fetchone()
+        if not cur: return jsonify({"message": "غير موجود"}), 404
+        np_ = db.execute("SELECT COUNT(*) FROM products WHERE category=?", (cur[0],)).fetchone()[0]
+        ns = db.execute("SELECT COUNT(*) FROM subsections WHERE section_id=?", (sid,)).fetchone()[0]
+        if np_ or ns:
+            return jsonify({"message": f"لا يمكن الحذف: القسم يحتوي {np_} منتج و{ns} قسم فرعي — انقلها أولاً ثم احذف"}), 409
+        db.execute("DELETE FROM sections WHERE id=?", (sid,))
     return jsonify({"message": "تم الحذف"})
 
 @app.get("/api/admin/products")
@@ -1292,8 +1353,14 @@ def adm_secs_del(sid):
 def adm_prods():
     sec = request.args.get("section", "")
     with get_db() as db:
-        rows = db.execute("SELECT id,name,category,emoji,image,sort_order,public_id,subsection_id FROM products ORDER BY id DESC LIMIT 300").fetchall() if not sec else \
-               db.execute("SELECT id,name,category,emoji,image,sort_order,public_id,subsection_id FROM products WHERE category=? ORDER BY sort_order", (sec,)).fetchall()
+        try:
+            rows = db.execute("SELECT id,name,category,emoji,image,sort_order,public_id,subsection_id,notes FROM products ORDER BY id DESC LIMIT 300").fetchall() if not sec else \
+                   db.execute("SELECT id,name,category,emoji,image,sort_order,public_id,subsection_id,notes FROM products WHERE category=? ORDER BY sort_order", (sec,)).fetchall()
+            has_notes = True
+        except Exception:
+            rows = db.execute("SELECT id,name,category,emoji,image,sort_order,public_id,subsection_id FROM products ORDER BY id DESC LIMIT 300").fetchall() if not sec else \
+                   db.execute("SELECT id,name,category,emoji,image,sort_order,public_id,subsection_id FROM products WHERE category=? ORDER BY sort_order", (sec,)).fetchall()
+            has_notes = False
         out = []
         for r in rows:
             cc = db.execute("SELECT COUNT(*) FROM skus WHERE product_id=?", (r[0],)).fetchone()[0]
@@ -1303,7 +1370,8 @@ def adm_prods():
                 sub = s[0] if s else ""
             out.append({"id": r[0], "name": r[1], "category": r[2], "emoji": r[3], "image": r[4] or "",
                         "sort_order": r[5], "public_id": r[6] or "", "subsection_id": r[7],
-                        "subsection_name": sub, "categories_count": cc})
+                        "subsection_name": sub, "categories_count": cc,
+                        "notes": (r[8] if has_notes else "") or ""})
     return jsonify(out)
 
 @app.post("/api/admin/products")
@@ -1312,9 +1380,15 @@ def adm_prods_add():
     b = request.get_json(force=True, silent=True) or {}
     with get_db() as db:
         img = (b.get("image") or "").strip() or branded_image_url(b.get("name", "منتج جديد"))
-        db.execute("INSERT INTO products(name,category,emoji,description,image,subsection_id,public_id) VALUES(?,?,?,?,?,?,?)",
-                   (b.get("name", "منتج جديد"), b.get("category", ""), b.get("emoji", "🎮"), b.get("description", ""),
-                    img, b.get("subsection_id"), str(secrets.randbelow(90000) + 10000)))
+        pub = str(secrets.randbelow(90000) + 10000)
+        try:
+            db.execute("INSERT INTO products(name,category,emoji,description,image,subsection_id,public_id,notes) VALUES(?,?,?,?,?,?,?,?)",
+                       (b.get("name", "منتج جديد"), b.get("category", ""), b.get("emoji", "🎮"), b.get("description", ""),
+                        img, b.get("subsection_id"), pub, b.get("notes", "")))
+        except Exception:
+            db.execute("INSERT INTO products(name,category,emoji,description,image,subsection_id,public_id) VALUES(?,?,?,?,?,?,?)",
+                       (b.get("name", "منتج جديد"), b.get("category", ""), b.get("emoji", "🎮"), b.get("description", ""),
+                        img, b.get("subsection_id"), pub))
     return jsonify({"message": "تمت الإضافة ✅"})
 
 @app.put("/api/admin/products/<int:pid>")
@@ -1322,12 +1396,37 @@ def adm_prods_add():
 def adm_prods_ed(pid):
     b = request.get_json(force=True, silent=True) or {}
     with get_db() as db:
-        cur = db.execute("SELECT name,category,emoji,description,image,sort_order FROM products WHERE id=?", (pid,)).fetchone()
+        cur = db.execute("SELECT name,category,emoji,description,image,sort_order,subsection_id FROM products WHERE id=?", (pid,)).fetchone()
         if not cur: return jsonify({"message": "غير موجود"}), 404
-        db.execute("UPDATE products SET name=?,category=?,emoji=?,description=?,image=?,sort_order=? WHERE id=?",
-                   (b.get("name", cur[0]), b.get("category", cur[1]), b.get("emoji", cur[2]),
+        new_cat = (b.get("category", cur[1]) or "").strip() or cur[1]
+        sec = db.execute("SELECT id FROM sections WHERE name=?", (new_cat,)).fetchone()
+        if not sec: return jsonify({"message": "القسم غير موجود — أنشئه أولاً ثم انقل المنتج إليه"}), 400
+        raw_sub = b.get("subsection_id", "__keep__")
+        if raw_sub == "__keep__":
+            new_sub = cur[6]
+            if new_sub:
+                ok = db.execute("SELECT 1 FROM subsections WHERE id=? AND section_id=?", (new_sub, sec[0])).fetchone()
+                if not ok: new_sub = None
+        elif raw_sub in (None, "", 0, "0"):
+            new_sub = None
+        else:
+            try: new_sub = int(raw_sub)
+            except (TypeError, ValueError): return jsonify({"message": "القسم الفرعي غير صالح"}), 400
+            ok = db.execute("SELECT 1 FROM subsections WHERE id=? AND section_id=?", (new_sub, sec[0])).fetchone()
+            if not ok: return jsonify({"message": "القسم الفرعي المختار لا ينتمي لهذا القسم"}), 400
+        try:
+            cur_notes = db.execute("SELECT notes FROM products WHERE id=?", (pid,)).fetchone()
+            has_notes_col = True
+        except Exception:
+            cur_notes, has_notes_col = None, False
+        new_notes = b.get("notes", (cur_notes[0] if cur_notes else "") or "")
+        db.execute("UPDATE products SET name=?,category=?,emoji=?,description=?,image=?,sort_order=?,subsection_id=? WHERE id=?",
+                   (b.get("name", cur[0]), new_cat, b.get("emoji", cur[2]),
                     b.get("description", cur[3] or ""), b.get("image", cur[4] or ""),
-                    int(b.get("sort_order", cur[5] or 0)), pid))
+                    int(b.get("sort_order", cur[5] or 0)), new_sub, pid))
+        if has_notes_col:
+            try: db.execute("UPDATE products SET notes=? WHERE id=?", (new_notes, pid))
+            except Exception: pass
     return jsonify({"message": "تم الحفظ ✅"})
 
 @app.delete("/api/admin/products/<int:pid>")
@@ -2707,20 +2806,58 @@ def img_auto(rid): return _entity_image("deposit_auto", rid)
 def ai_gen():
     b = request.get_json(force=True, silent=True) or {}
     name = b.get("name") or b.get("product", "store banner")
-    url, key = get_setting("ai_image_api_url", ""), get_setting("ai_image_api_key", "")
+    url, key = (get_setting("ai_image_api_url", "") or "").strip(), (get_setting("ai_image_api_key", "") or "").strip()
+    err_detail = ""
     if url and key:
+        # التوليد عبر API الخارجي أولاً
         prompt = (b.get("prompt") or get_setting("ai_image_prompt_template", "")).replace("{product}", name)
         try:
             import requests as _rq
             r = _rq.post(url, json={"prompt": prompt, "key": key}, timeout=25)
-            d = r.json() if r.ok else {}
-            img = d.get("image_url") or d.get("image") or d.get("url") or ""
-            if img: return jsonify({"message": "تم التوليد ✅", "image": img, "url": img})
-        except Exception:
-            pass
+            ok, img, err_detail = _extract_ai_image(r)
+            if ok:
+                return jsonify({"message": "تم التوليد عبر API ✅", "image": img, "url": img})
+        except Exception as e:
+            err_detail = f"تعذّر الاتصال بخدمة توليد الصور: {e}"
+    # fallback: توليد محلي بهوية المتجر حتى لا يبقى المستخدم بلا صورة
+    # (مع إظهار سبب فشل المحرك الخارجي إن وُجد)
     img = branded_image_url(name)
-    if not img: return jsonify({"message": "تعذّر التوليد"}), 502
-    return jsonify({"message": "تم التوليد بهوية المتجر ✅", "image": img, "url": img})
+    if not img:
+        return jsonify({"message": err_detail or "تعذّر التوليد"}), 502
+    if err_detail:
+        msg = f"المحرك الخارجي فشل ({err_detail}) — تم التوليد بهوية المتجر بدلاً منه ✅"
+    else:
+        msg = "تم التوليد بهوية المتجر ✅ (لا يوجد API خارجي مضبوط)"
+    return jsonify({"message": msg, "image": img, "url": img, "fallback": bool(err_detail)})
+
+
+def _extract_ai_image(r):
+    """يستخرج رابط الصورة من رد خدمة التوليد بصيغ متعددة.
+    يرجع (نجح؟, الرابط, وصف الخطأ)."""
+    if not r.ok:
+        return False, "", f"رفضت الطلب (رمز {r.status_code}): {(r.text or '')[:300]}"
+    try:
+        d = r.json()
+    except Exception:
+        return False, "", "أرجعت رداً غير صالح (ليس JSON)"
+    for getter in (
+        lambda x: x.get("image_url"), lambda x: x.get("image"), lambda x: x.get("url"),
+        lambda x: (x.get("data") or {}).get("url") if isinstance(x.get("data"), dict) else None,
+        lambda x: (x.get("data") or {}).get("image") if isinstance(x.get("data"), dict) else None,
+        lambda x: (x.get("result") or {}).get("url") if isinstance(x.get("result"), dict) else None,
+        lambda x: (x.get("images") or [None])[0] if isinstance(x.get("images"), list) else None,
+        lambda x: (x.get("output") or [None])[0] if isinstance(x.get("output"), list) else None,
+    ):
+        try:
+            v = getter(d) if isinstance(d, dict) else None
+        except Exception:
+            v = None
+        if isinstance(v, str) and v.strip():
+            return True, v.strip(), ""
+    detail = ""
+    if isinstance(d, dict):
+        detail = str(d.get("detail") or d.get("error") or d.get("message") or "")[:200]
+    return False, "", f"لم تُرجع أي صورة في الرد{(' — ' + detail) if detail else ''}"
 
 @app.post("/api/admin/ai-image/apply")
 @require_admin

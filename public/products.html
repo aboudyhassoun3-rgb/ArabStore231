@@ -153,7 +153,7 @@
             <a class="photo-tile" href="/products.html?section=${encodeURIComponent(section)}&section_id=${encodeURIComponent(sectionId)}&subsection_id=${s.id}&subsection_name=${encodeURIComponent(s.name)}">
               <div class="photo-tile-art ${s.image ? '' : v.art}">                ${art}
               </div>
-              <div class="photo-tile-banner">${s.emoji||''} ${s.name}</div>
+              <div class="photo-tile-banner" dir="auto">${s.emoji||''} ${s.name}</div>
             </a>`;
           }).join("");
           return;
@@ -186,7 +186,7 @@
       <a class="photo-tile" href="/product.html?id=${p.id}&name=${encodeURIComponent(p.name)}">
         <div class="photo-tile-art ${p.image ? '' : v.art}">          ${art}
         </div>
-        <div class="photo-tile-banner">${p.emoji||''} ${p.name}</div>
+        <div class="photo-tile-banner" dir="auto">${p.emoji||''} ${p.name}</div>
       </a>`;
     }).join("");
   }
