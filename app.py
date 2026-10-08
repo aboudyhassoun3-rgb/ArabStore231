@@ -50,7 +50,13 @@ admin_ser = URLSafeTimedSerializer(SECRET_KEY, salt="admin-v2")
 UPLOAD_DIR = os.path.join(DATA_DIR, "uploads")
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-limiter = Limiter(key_func=get_remote_address, app=app,
+def _rate_key():
+    # خلف Vercel يكون remote_addr عنوان البروكسي للجميع — نستخدم أول IP حقيقي
+    # وإلا اجتمع كل المستخدمين في عدّاد واحد وحُظر تسجيل الدخول للجميع.
+    fwd = (request.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+    return fwd or get_remote_address()
+
+limiter = Limiter(key_func=_rate_key, app=app,
                   default_limits=["300 per hour", "60 per minute"], storage_uri="memory://")
 
 # ---------- db layer ----------
@@ -95,14 +101,14 @@ class PgWrap:
     """Accepts ? placeholders, rewrites to %s for psycopg."""
     def __init__(self, c): self.c = c
     def _rw(self, sql):
-        out = []; i = 0
-        for ch in sql:
-            if ch == "?": i += 1; out.append(f"%s")
-            else: out.append(ch)
-        return "".join(out).replace("AUTOINCREMENT", "GENERATED ALWAYS AS IDENTITY") \
-            .replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY") \
-            .replace("DATETIME DEFAULT CURRENT_TIMESTAMP", "TIMESTAMP DEFAULT NOW()") \
-            .replace("TIMESTAMP DEFAULT CURRENT_TIMESTAMP", "TIMESTAMP DEFAULT NOW()")
+        # مهم: استبدال النمط الأطول أولاً، وإلا يبقى "INTEGER PRIMARY KEY GENERATED..."
+        # غير صالح بدل SERIAL.
+        s = "".join("%s" if ch == "?" else ch for ch in sql)
+        s = s.replace("INTEGER PRIMARY KEY AUTOINCREMENT", "SERIAL PRIMARY KEY")
+        s = s.replace("AUTOINCREMENT", "GENERATED ALWAYS AS IDENTITY")
+        s = s.replace("DATETIME DEFAULT CURRENT_TIMESTAMP", "TIMESTAMP DEFAULT NOW()")
+        s = s.replace("TIMESTAMP DEFAULT CURRENT_TIMESTAMP", "TIMESTAMP DEFAULT NOW()")
+        return s
     def cur(self): return self.c.cursor()
     def execute(self, sql, p=()):
         cur = self.c.cursor(); cur.execute(self._rw(sql), p); return cur
@@ -124,7 +130,7 @@ def save_svg_bytes(svg_text, filename):
             r = _rq.post(f"{surl}/storage/v1/object/{bucket}/{name}",
                          headers={"Authorization": f"Bearer {skey}", "apikey": skey,
                                   "Content-Type": "image/svg+xml", "x-upsert": "true"},
-                         data=data, timeout=25)
+                          data=data, timeout=8)
             r.raise_for_status()
             return f"{surl}/storage/v1/object/public/{bucket}/{name}"
         except Exception:
@@ -133,14 +139,15 @@ def save_svg_bytes(svg_text, filename):
         fh.write(data)
     return f"/uploads/{name}"
 
-def branded_image_url(product_name):
+def branded_image_url(product_name, store_name=None):
     """صورة تلقائية للمنتج: تدرّج + إيموجي + الاسم + شريط المتجر. ترجع '' عند الفشل."""
     try:
         from branding import build_product_svg, brand_filename
-        try:
-            store_name = get_setting("store_name", "ARAB STORE")
-        except Exception:
-            store_name = "ARAB STORE"
+        if store_name is None:
+            try:
+                store_name = get_setting("store_name", "ARAB STORE")
+            except Exception:
+                store_name = "ARAB STORE"
         return save_svg_bytes(build_product_svg(product_name, store_name),
                               brand_filename(product_name))
     except Exception:
@@ -406,7 +413,7 @@ def save_upload(fs):
             r = _rq.post(f"{surl}/storage/v1/object/{bucket}/{name}",
                          headers={"Authorization": f"Bearer {skey}", "apikey": skey,
                                   "Content-Type": fs.mimetype or "image/png", "x-upsert": "true"},
-                         data=data, timeout=25)
+                          data=data, timeout=8)
             r.raise_for_status()
             return f"{surl}/storage/v1/object/public/{bucket}/{name}"
         except Exception: pass
@@ -425,7 +432,7 @@ def provider_buy(sku_row, player, qty, token=None, url=None, product_ref=None):
             import requests as _rq
             payload = {"token": tok, "api_token": tok, "product_id": product_ref,
                        "player_id": player, "player": player, "qty": qty, "quantity": qty}
-            r = _rq.post(f"{base}/api/order", json=payload, timeout=25)
+            r = _rq.post(f"{base}/api/order", json=payload, timeout=10)
             if r.ok:
                 try: d = r.json()
                 except Exception: d = {}
@@ -453,7 +460,7 @@ def provider_status(porder):
     if PROVIDER_TOKEN:
         try:
             import requests as _rq
-            r = _rq.get(f"{PROVIDER_URL}/api/order-status", params={"token": PROVIDER_TOKEN, "order_id": porder}, timeout=15)
+            r = _rq.get(f"{PROVIDER_URL}/api/order-status", params={"token": PROVIDER_TOKEN, "order_id": porder}, timeout=8)
             if r.ok: return str(r.json().get("status", "pending"))
         except Exception: pass
     return "completed"
@@ -461,9 +468,14 @@ def provider_status(porder):
 # ---------- maintenance guard ----------
 @app.before_request
 def _maint():
-    if request.path.startswith("/api/") and not (request.path.startswith("/api/auth/") or request.path.startswith("/api/admin/") or request.path == "/api/maintenance-status"):
-        if get_setting("maintenance_enabled", "false") == "true":
-            return jsonify({"message": "المتجر في صيانة مؤقتة ✨ نعود قريباً", "maintenance": True}), 503
+    try:
+        if request.path.startswith("/api/") and not (request.path.startswith("/api/auth/") or request.path.startswith("/api/admin/") or request.path == "/api/maintenance-status"):
+            if get_setting("maintenance_enabled", "false") == "true":
+                return jsonify({"message": "المتجر في صيانة مؤقتة ✨ نعود قريباً", "maintenance": True}), 503
+    except Exception:
+        # fail-open: عطل قاعدة البيانات يجب ألا يسقط كل الـ API.
+        # الصفحات الثابتة و/health تستمر بالعمل، والخطأ يظهر في /health.
+        pass
 
 # ================= AUTH =================
 @app.post("/api/auth/register")
@@ -1738,7 +1750,7 @@ def create_invoice():
     ref = f"NZ-{uid}-{int(time.time())}"
     try:
         import requests as _rq
-        resp = _rq.post((m[3] or "").rstrip("/") + "/invoice", json={"token": m[2], "amount": amount, "currency": currency, "reference": ref}, timeout=20)
+        resp = _rq.post((m[3] or "").rstrip("/") + "/invoice", json={"token": m[2], "amount": amount, "currency": currency, "reference": ref}, timeout=10)
         pay = resp.json().get("payment_url") if resp.ok else None
     except Exception: pay = None
     if not pay: return jsonify({"message": "تعذّر إنشاء الفاتورة لدى المزوّد"}), 502
@@ -2099,7 +2111,7 @@ def adm_provs_del(pid):
 def _provider_products(prov):
     try:
         import requests as _rq
-        r = _rq.post((prov[2] or "").rstrip("/") + "/products", json={"token": prov[1]}, timeout=20)
+        r = _rq.post((prov[2] or "").rstrip("/") + "/products", json={"token": prov[1]}, timeout=10)
         if r.ok:
             d = r.json()
             return d if isinstance(d, list) else d.get("products", [])
@@ -2320,6 +2332,10 @@ def adm_prov_import_file():
 
     from classify import classify, section_color, extract_game, game_style
     grouping = (request.form.get("grouping") or "sections").strip().lower()
+    try:
+        _brand_store = get_setting("store_name", "ARAB STORE")
+    except Exception:
+        _brand_store = "ARAB STORE"
     imported, dup, skipped = 0, 0, 0
     skipped_sample, sections_used = [], set()
     with get_db() as db:
@@ -2362,7 +2378,7 @@ def adm_prov_import_file():
             sections_used.add(secname)
             p = db.execute("SELECT id FROM products WHERE name=?", (name,)).fetchone()
             if not p:
-                img = branded_image_url(name)
+                img = branded_image_url(name, _brand_store)
                 cur = db.execute("INSERT INTO products(name,category,emoji,image,public_id) VALUES(?,?,?,?,?) RETURNING id" if USE_PG
                                  else "INSERT INTO products(name,category,emoji,image,public_id) VALUES(?,?,?,?,?)",
                                  (name, secname, emo, img, str(secrets.randbelow(90000) + 10000)))
@@ -2515,7 +2531,7 @@ def ai_gen():
         prompt = (b.get("prompt") or get_setting("ai_image_prompt_template", "")).replace("{product}", name)
         try:
             import requests as _rq
-            r = _rq.post(url, json={"prompt": prompt, "key": key}, timeout=60)
+            r = _rq.post(url, json={"prompt": prompt, "key": key}, timeout=25)
             d = r.json() if r.ok else {}
             img = d.get("image_url") or d.get("image") or d.get("url") or ""
             if img: return jsonify({"message": "تم التوليد ✅", "image": img, "url": img})
@@ -2758,6 +2774,14 @@ def _restore_tables(data):
             ph = ",".join(["?"] * len(cols))
             for r in rows:
                 try: db.execute(f"INSERT INTO {t}({','.join(cols)}) VALUES({ph})", tuple(r))
+                except Exception: pass
+        if USE_PG:
+            # بعد إدخال ids صريحة يجب تقديم التسلسلات وإلا فشلت الإدخالات اللاحقة بتعارض.
+            for t in ("web_users", "sections", "subsections", "products", "skus",
+                      "deposit_manual", "deposit_auto", "deposit_requests", "orders",
+                      "transactions", "notifications", "banners", "tiers"):
+                try:
+                    db.execute(f"SELECT setval(pg_get_serial_sequence('{t}','id'), COALESCE((SELECT MAX(id) FROM {t}),0)+1, false)")
                 except Exception: pass
 
 def _auto_snapshot(reason="auto"):
