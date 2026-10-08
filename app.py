@@ -39,7 +39,7 @@ PROVIDER_TOKEN = os.environ.get("ARAB_API_TOKEN", "").strip()
 PROVIDER_URL = (os.environ.get("ARAB_API_BASE_URL", "") or "").strip().rstrip("/") or "https://api.shams4store.com"
 OWNER_EMAILS = {"aboudyhassoun3@gmail.com"}
 TOKEN_AGE = 60 * 60 * 24 * 30
-WEB_ID_OFFSET = 9_000_000_000_000
+WEB_ID_OFFSET = 2_000_000_000  # كان 9e12 لكنه يتجاوز حد INTEGER في Postgres (2.1e9) فيفشل التسجيل — 2e9 يكفي لمئات الملايين
 ALLOWED_IMG = {"png", "jpg", "jpeg", "webp", "gif"}
 
 app = Flask(__name__, static_folder="public", static_url_path="")
@@ -105,6 +105,41 @@ class LiteWrap:
     def execute(self, sql, p=()):
         cur = self.c.cursor(); cur.execute(sql, p); return cur
 
+class Row(tuple):
+    """صف متوافق مع sqlite3.Row: يدعم الوصول بالاسم وبالرقم معاً.
+    بدونه تنفجر كل استعلامات Postgres (tuples عادية بلا .keys()) بخطأ 500."""
+    def __new__(cls, values, keys=()):
+        obj = super().__new__(cls, tuple(values))
+        obj._keys = list(keys or [])
+        return obj
+    def keys(self): return list(self._keys)
+    def __getitem__(self, k):
+        if isinstance(k, str):
+            try: return super().__getitem__(self._keys.index(k))
+            except ValueError: raise KeyError(k)
+        return super().__getitem__(k)
+    def get(self, k, d=None):
+        try: return self[k]
+        except (KeyError, IndexError): return d
+
+class _PgCur:
+    """يغلّف كرسر psycopg ليُرجع صفوف Row بدل tuples العادية."""
+    def __init__(self, cur):
+        self._cur = cur
+        try: self._keys = [d[0] for d in (cur.description or [])]
+        except Exception: self._keys = []
+        self.lastrowid = None
+    def fetchone(self):
+        r = self._cur.fetchone()
+        return Row(r, self._keys) if r is not None else None
+    def fetchall(self):
+        return [Row(r, self._keys) for r in self._cur.fetchall()]
+    def fetchmany(self, n=None):
+        rows = self._cur.fetchmany(n) if n else self._cur.fetchmany()
+        return [Row(r, self._keys) for r in rows]
+    def __getattr__(self, name):
+        return getattr(self._cur, name)
+
 class PgWrap:
     """Accepts ? placeholders, rewrites to %s for psycopg."""
     def __init__(self, c): self.c = c
@@ -119,7 +154,7 @@ class PgWrap:
         return s
     def cur(self): return self.c.cursor()
     def execute(self, sql, p=()):
-        cur = self.c.cursor(); cur.execute(self._rw(sql), p); return cur
+        cur = self.c.cursor(); cur.execute(self._rw(sql), p); return _PgCur(cur)
 
 def _cols(cur, row):
     if row is None: return None
@@ -202,39 +237,55 @@ CREATE TABLE IF NOT EXISTS user_tier(user_id INTEGER PRIMARY KEY, tier_id INTEGE
 CREATE TABLE IF NOT EXISTS referrals(code TEXT PRIMARY KEY, owner_id INTEGER, uses INTEGER DEFAULT 0);
 """
 
+@contextmanager
+def _init_db_conn():
+    """اتصال التهيئة: autocommit على Postgres — كل عبارة معاملة مستقلة
+    ففشل عبارة (عمود موجود، جدول لاحق) لا يسمّم البقية أبداً.
+    على SQLite العزل موجود أصلاً (isolation_level=None)."""
+    if USE_PG:
+        import psycopg
+        conn = psycopg.connect(DATABASE_URL, connect_timeout=8, autocommit=True)
+        try:
+            yield PgWrap(conn)
+        finally:
+            conn.close()
+    else:
+        with get_db() as db:
+            yield db
+
+# فهارس الأداء — تُنشأ بعد كل الجداول (بما فيها الإضافية) لأن بعضها عليها.
+INDEXES = [
+    "CREATE INDEX IF NOT EXISTS idx_web_users_email ON web_users(email)",
+    "CREATE INDEX IF NOT EXISTS idx_web_users_site ON web_users(site_user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_auth_tokens_token ON auth_tokens(token)",
+    "CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)",
+    "CREATE INDEX IF NOT EXISTS idx_orders_uuid ON orders(order_uuid)",
+    "CREATE INDEX IF NOT EXISTS idx_deposit_user ON deposit_requests(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_deposit_status ON deposit_requests(status)",
+    "CREATE INDEX IF NOT EXISTS idx_tx_user ON transactions(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id)",
+    "CREATE INDEX IF NOT EXISTS idx_products_cat ON products(category)",
+    "CREATE INDEX IF NOT EXISTS idx_skus_prod ON skus(product_id)",
+    "CREATE INDEX IF NOT EXISTS idx_links_prov ON category_links(provider_id, provider_product)",
+    "CREATE INDEX IF NOT EXISTS idx_ref_owner ON referrals(owner_id)",
+]
+
+def _run_idempotent(db, stmts):
+    for s in stmts:
+        try: db.execute(s)
+        except Exception: pass
+
 def init_db():
-    with get_db() as db:
-        for stmt in [s for s in SCHEMA.split(";") if s.strip()]:
-            try: db.execute(stmt)
-            except Exception: pass
+    with _init_db_conn() as db:
+        _run_idempotent(db, [s for s in SCHEMA.split(";") if s.strip()])
         # ترحيل أعمدة جديدة لقواعد قديمة
-        for mig in ["ALTER TABLE web_users ADD COLUMN blocked INTEGER DEFAULT 0",
+        _run_idempotent(db, ["ALTER TABLE web_users ADD COLUMN blocked INTEGER DEFAULT 0",
                     "ALTER TABLE skus ADD COLUMN unit_qty INTEGER DEFAULT 1",
                     "ALTER TABLE skus ADD COLUMN type TEXT DEFAULT 'fixed'",
                     "ALTER TABLE orders ADD COLUMN cost_usd REAL DEFAULT 0",
                     "ALTER TABLE tiers ADD COLUMN sort_order INTEGER DEFAULT 0",
-                    "ALTER TABLE web_admins ADD COLUMN added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"]:
-            try: db.execute(mig)
-            except Exception: pass
-        # فهارس للأعمدة الساخنة — ضرورية مع آلاف الحسابات والمنتجات.
-        for idx in [
-            "CREATE INDEX IF NOT EXISTS idx_web_users_email ON web_users(email)",
-            "CREATE INDEX IF NOT EXISTS idx_web_users_site ON web_users(site_user_id)",
-            "CREATE INDEX IF NOT EXISTS idx_auth_tokens_token ON auth_tokens(token)",
-            "CREATE INDEX IF NOT EXISTS idx_orders_user ON orders(user_id)",
-            "CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(status)",
-            "CREATE INDEX IF NOT EXISTS idx_orders_uuid ON orders(order_uuid)",
-            "CREATE INDEX IF NOT EXISTS idx_deposit_user ON deposit_requests(user_id)",
-            "CREATE INDEX IF NOT EXISTS idx_deposit_status ON deposit_requests(status)",
-            "CREATE INDEX IF NOT EXISTS idx_tx_user ON transactions(user_id)",
-            "CREATE INDEX IF NOT EXISTS idx_notif_user ON notifications(user_id)",
-            "CREATE INDEX IF NOT EXISTS idx_products_cat ON products(category)",
-            "CREATE INDEX IF NOT EXISTS idx_skus_prod ON skus(product_id)",
-            "CREATE INDEX IF NOT EXISTS idx_links_prov ON category_links(provider_id, provider_product)",
-            "CREATE INDEX IF NOT EXISTS idx_ref_owner ON referrals(owner_id)",
-        ]:
-            try: db.execute(idx)
-            except Exception: pass
+                    "ALTER TABLE web_admins ADD COLUMN added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP"])
         # settings defaults
         defaults = {"exchange_rate": "13800", "support_username": "aboudy2312",
                     "support_telegram": "https://t.me/aboudy2312", "support_whatsapp": "",
@@ -249,12 +300,13 @@ def init_db():
             try: db.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING" if USE_PG
                             else "INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
             except Exception: pass
-        # seed demo catalog once
-        try:
+    # seed بمعاملة واحدة مستقلة — الفشل هنا يتراجع بأمان وتُعاد المحاولة عند الإقلاع التالي.
+    try:
+        with get_db() as db:
             n = db.execute("SELECT COUNT(*) FROM sections").fetchone()[0]
             if (n or 0) == 0:
                 seed(db)
-        except Exception: pass
+    except Exception: pass
 
 def seed(db):
     secs = [("شحن الألعاب", "#7c5cff", "🎮"), ("بطاقات رقمية", "#f5a623", "💳"), ("خدمات التواصل", "#22c55e", "📱")]
@@ -362,6 +414,88 @@ def is_admin(email):
         try: return bool(db.execute("SELECT 1 FROM web_admins WHERE email=?", (e,)).fetchone())
         except Exception: return False
 
+def _g(w, key, idx, default=""):
+    """قراءة آمنة بالاسم ثم بالرقم — تعمل على sqlite3.Row وRow وtuples."""
+    try:
+        v = w[key]
+        return default if v is None else v
+    except Exception:
+        pass
+    try:
+        v = w[idx]
+        return default if v is None else v
+    except Exception:
+        return default
+
+def _setting_db(db, k, d=""):
+    now = time.time()
+    hit = _SETTINGS_CACHE["data"].get(k)
+    if hit is not None and now - _SETTINGS_CACHE["at"] < _SETTINGS_TTL:
+        return hit
+    try:
+        r = db.execute("SELECT value FROM settings WHERE key=?", (k,)).fetchone()
+        v = (r[0] if r else d)
+    except Exception:
+        v = d
+    _SETTINGS_CACHE["data"][k] = v
+    _SETTINGS_CACHE["at"] = now
+    return v
+
+def _user_public_db(db, w):
+    """نسخة باتصال واحد من row_to_user_public — للمسارات الساخنة."""
+    try: uid = int(_g(w, "site_user_id", 4, 0) or 0)
+    except Exception: uid = 0
+    try:
+        b = db.execute("SELECT balance FROM balances WHERE user_id=?", (uid,)).fetchone()
+        bal = int(b[0]) if b else 0
+    except Exception: bal = 0
+    try: r = float(_setting_db(db, "exchange_rate", "13800") or 13800)
+    except Exception: r = 13800.0
+    try:
+        t = db.execute("SELECT t.name,t.percent FROM user_tier ut JOIN tiers t ON t.id=ut.tier_id WHERE ut.user_id=?", (uid,)).fetchone()
+        disc = (t[0], float(t[1])) if t else None
+    except Exception: disc = None
+    email = _g(w, "email", 2, "")
+    try:
+        adm = bool(db.execute("SELECT 1 FROM web_admins WHERE email=?", ((email or "").lower(),)).fetchone())
+    except Exception: adm = False
+    return {"id": _g(w, "id", 0, 0), "name": _g(w, "name", 1, ""),
+            "email": email, "balance_syp": bal, "balance_usd": round(bal / r, 2) if r else 0,
+            "api_enabled": bool(_g(w, "api_enabled", 7, 0)),
+            "preferred_currency": (str(_g(w, "preferred_currency", 8, "USD")) or "USD").upper(),
+            "country": _g(w, "country", 9, ""), "phone": _g(w, "phone", 10, ""),
+            "discount_percent": disc[1] if disc else 0, "discount_tier_name": disc[0] if disc else "",
+            "is_owner": (email or "").lower() in OWNER_EMAILS,
+            "is_admin": bool(adm) or (email or "").lower() in OWNER_EMAILS}
+
+def _issue_token_db(db, web_id, admin=False, owner=False):
+    tok = secrets.token_urlsafe(32)
+    try:
+        cutoff = (datetime.now() - timedelta(days=60)).strftime("%Y-%m-%d %H:%M:%S")
+        db.execute("DELETE FROM auth_tokens WHERE created_at < ?", (cutoff,))
+    except Exception: pass
+    db.execute("INSERT INTO auth_tokens(token,web_id,is_admin,is_owner) VALUES(?,?,?,?)",
+               (tok, web_id if not admin else None, 1 if admin else 0, 1 if owner else 0))
+    return tok
+
+def _auth_lookup(tok):
+    """(wid, row) باتصال واحد — للدخول والتحقق."""
+    if not tok: return None, None
+    with get_db() as db:
+        try:
+            r = db.execute("SELECT web_id FROM auth_tokens WHERE token=? AND (is_admin=0 OR is_admin IS NULL)", (tok,)).fetchone()
+            if r and r[0] is not None:
+                wid = int(r[0])
+            else:
+                try: wid = int(user_ser.loads(tok, max_age=TOKEN_AGE).get("web_id"))
+                except Exception: return None, None
+        except Exception:
+            try: wid = int(user_ser.loads(tok, max_age=TOKEN_AGE).get("web_id"))
+            except Exception: return None, None
+        try: row = db.execute("SELECT * FROM web_users WHERE id=?", (wid,)).fetchone()
+        except Exception: row = None
+        return wid, row
+
 def notify(user_id, title, msg="", kind="info"):
     with get_db() as db:
         db.execute("INSERT INTO notifications(user_id,title,message,kind) VALUES(?,?,?,?)", (user_id, title, msg, kind))
@@ -412,11 +546,10 @@ def require_auth(f):
     def w(*a, **kw):
         h = request.headers.get("Authorization", "")
         if not h.startswith("Bearer "): return jsonify({"message": "سجّل دخولك أولاً"}), 401
-        wid = token_to_web(h[7:])
-        if not wid:
+        wid, u = _auth_lookup(h[7:])
+        if not wid or not u:
             return jsonify({"message": "انتهت الجلسة، سجّل دخولك من جديد"}), 401
-        u = get_web_by_id(wid)
-        if not u: return jsonify({"message": "الحساب غير موجود"}), 401
+        request.wid = wid
         request.wu = u; return f(*a, **kw)
     return w
 
@@ -526,11 +659,14 @@ def register():
     if not name or not email or len(pw) < 6: return jsonify({"message": "أكمل الاسم والإيميل وكلمة مرور 6+ أحرف"}), 400
     if not country: return jsonify({"message": "اختر البلد"}), 400
     if len(phone) < 6: return jsonify({"message": "رقم هاتف غير صحيح"}), 400
-    if get_web_by_email(email): return jsonify({"message": "هذا الإيميل مسجّل مسبقاً"}), 409
+    pw_hash = generate_password_hash(pw)
+    # كل شيء باتصال واحد — مهم لـ Postgres السحابي (كل اتصال جديد مكلف).
     with get_db() as db:
+        if db.execute("SELECT 1 FROM web_users WHERE email=?", (email,)).fetchone():
+            return jsonify({"message": "هذا الإيميل مسجّل مسبقاً"}), 409
         cur = db.execute("INSERT INTO web_users(name,email,password_hash,country,phone) VALUES(?,?,?,?,?) RETURNING id" if USE_PG
                          else "INSERT INTO web_users(name,email,password_hash,country,phone) VALUES(?,?,?,?,?)",
-                         (name, email, generate_password_hash(pw), country, phone))
+                         (name, email, pw_hash, country, phone))
         wid = cur.fetchone()[0] if USE_PG else cur.lastrowid
         sid = WEB_ID_OFFSET + int(wid)
         db.execute("UPDATE web_users SET site_user_id=? WHERE id=?", (sid, wid))
@@ -538,8 +674,10 @@ def register():
         else: db.execute("INSERT OR IGNORE INTO balances(user_id,balance) VALUES(?,0)", (sid,))
         try: db.execute("INSERT INTO referrals(code,owner_id) VALUES(?,?)", (f"REF-{wid}-{secrets.token_hex(2).upper()}", sid))
         except Exception: pass
-    u = get_web_by_id(wid)
-    return jsonify({"token": issue_token(wid), "user": row_to_user_public(u)})
+        u = db.execute("SELECT * FROM web_users WHERE id=?", (wid,)).fetchone()
+        tok = _issue_token_db(db, wid)
+        pub = _user_public_db(db, u)
+    return jsonify({"token": tok, "user": pub})
 
 @app.post("/api/auth/logout")
 def logout():
@@ -552,20 +690,24 @@ def logout():
 def login():
     b = request.get_json(force=True, silent=True) or {}
     email, pw = (b.get("email") or "").lower().strip(), b.get("password") or ""
-    u = get_web_by_email(email)
-    if not u or not check_password_hash(u["password_hash"] if "password_hash" in u.keys() else u[3], pw):
-        return jsonify({"message": "الإيميل أو كلمة المرور غير صحيحة"}), 401
-    try:
-        blocked = u["blocked"] if "blocked" in u.keys() else None
-    except Exception:
-        blocked = None
-    if blocked:
-        return jsonify({"message": "تم حظر حسابك — تواصل مع الدعم"}), 403
-    return jsonify({"token": issue_token(int(u["id"] if "id" in u.keys() else u[0])), "user": row_to_user_public(u)})
+    with get_db() as db:
+        u = db.execute("SELECT * FROM web_users WHERE email=?", (email,)).fetchone()
+        if not u:
+            return jsonify({"message": "الإيميل أو كلمة المرور غير صحيحة"}), 401
+        if not check_password_hash(_g(u, "password_hash", 3, ""), pw):
+            return jsonify({"message": "الإيميل أو كلمة المرور غير صحيحة"}), 401
+        if _g(u, "blocked", 12, 0):
+            return jsonify({"message": "تم حظر حسابك — تواصل مع الدعم"}), 403
+        wid = int(_g(u, "id", 0, 0))
+        tok = _issue_token_db(db, wid)
+        pub = _user_public_db(db, u)
+    return jsonify({"token": tok, "user": pub})
 
 @app.get("/api/auth/me")
 @require_auth
-def me(): return jsonify({"user": row_to_user_public(request.wu)})
+def me():
+    with get_db() as db:
+        return jsonify({"user": _user_public_db(db, request.wu)})
 
 @app.post("/api/auth/update-profile")
 @require_auth
@@ -1611,10 +1753,10 @@ CREATE TABLE IF NOT EXISTS auth_tokens(token TEXT PRIMARY KEY, web_id INTEGER, i
 CREATE TABLE IF NOT EXISTS snapshots(id TEXT PRIMARY KEY, reason TEXT DEFAULT '', payload TEXT DEFAULT '', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 """
 def ensure_extra():
-    with get_db() as db:
-        for stmt in [s for s in EXTRA_SCHEMA.split(";") if s.strip()]:
-            try: db.execute(stmt)
-            except Exception: pass
+    with _init_db_conn() as db:
+        _run_idempotent(db, [s for s in EXTRA_SCHEMA.split(";") if s.strip()])
+        # الفهارس هنا بعد اكتمال كل الجداول (بما فيها auth_tokens وcategory_links).
+        _run_idempotent(db, INDEXES)
 try:
     ensure_extra()
 except Exception as e:
