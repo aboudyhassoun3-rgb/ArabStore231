@@ -299,7 +299,7 @@ def init_db():
                     "welcome_message": "أهلاً بك في ARAB STORE ✨",
                     "logo_image": "", "dev_logo": "", "app_icon": "",
                     "ai_image_api_url": "", "ai_image_api_key": "",
-                    "ai_image_prompt_template": "game top-up banner, {product}, neon",
+                    "ai_image_prompt_template": "luxury dark gaming store artwork for {product} with official brand emblem badge, deep navy background #0b0f19, red neon glow accents #ff1a3c, gold highlights #ffc24b, premium glassmorphism card, cinematic lighting, centered composition, bold uppercase English title text only, absolutely no Arabic text, no watermark",
                     "maintenance_enabled": "false", "maintenance_ends_at": ""}
         for k, v in defaults.items():
             try: db.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING" if USE_PG
@@ -1628,10 +1628,22 @@ def adm_prods_add():
     with get_db() as db:
         img = (b.get("image") or "").strip() or branded_image_url(b.get("name", "منتج جديد"))
         pub = str(secrets.randbelow(90000) + 10000)
+        # ترتيب متسلسل داخل النطاق (قسم+فرع) حتى تعمل أسهم التطليع/التنزيل من أول منتج
         try:
-            db.execute("INSERT INTO products(name,category,emoji,description,image,subsection_id,public_id,notes) VALUES(?,?,?,?,?,?,?,?)",
+            sub = b.get("subsection_id") or None
+            if sub is None:
+                mx = db.execute("SELECT COALESCE(MAX(sort_order),-1) FROM products WHERE category=? AND (subsection_id IS NULL OR subsection_id=0)",
+                                (b.get("category", ""),)).fetchone()[0]
+            else:
+                mx = db.execute("SELECT COALESCE(MAX(sort_order),-1) FROM products WHERE category=? AND subsection_id=?",
+                                (b.get("category", ""), sub)).fetchone()[0]
+            nxt = int(mx or 0) + 1
+        except Exception:
+            nxt = 0
+        try:
+            db.execute("INSERT INTO products(name,category,emoji,description,image,subsection_id,public_id,notes,sort_order) VALUES(?,?,?,?,?,?,?,?,?)",
                        (b.get("name", "منتج جديد"), b.get("category", ""), b.get("emoji", "🎮"), b.get("description", ""),
-                        img, b.get("subsection_id"), pub, b.get("notes", "")))
+                        img, b.get("subsection_id"), pub, b.get("notes", ""), nxt))
         except Exception:
             db.execute("INSERT INTO products(name,category,emoji,description,image,subsection_id,public_id) VALUES(?,?,?,?,?,?,?)",
                        (b.get("name", "منتج جديد"), b.get("category", ""), b.get("emoji", "🎮"), b.get("description", ""),
@@ -1682,6 +1694,98 @@ def adm_prods_del(pid):
     with get_db() as db:
         db.execute("DELETE FROM skus WHERE product_id=?", (pid,)); db.execute("DELETE FROM products WHERE id=?", (pid,))
     return jsonify({"message": "تم الحذف"})
+
+
+def _product_scope(db, pid):
+    """نطاق ترتيب المنتج: نفس القسم + نفس الفرع (NULL/0 تُعامل كـ(بدون فرع))."""
+    cur = db.execute("SELECT category,subsection_id FROM products WHERE id=?", (pid,)).fetchone()
+    if not cur:
+        return None
+    return (cur[0] or "", cur[1] if cur[1] else None)
+
+
+@app.post("/api/admin/products/reorder")
+@require_admin
+def adm_prods_reorder():
+    """إعادة ترتيب صريحة: {ids:[...]} بالترتيب المطلوب — تُكتب sort_order=0..n."""
+    ids = (request.get_json(force=True, silent=True) or {}).get("ids") or []
+    try:
+        ids = [int(x) for x in ids]
+    except (TypeError, ValueError):
+        return jsonify({"message": "قائمة ids غير صالحة"}), 400
+    with get_db() as db:
+        for i, pid in enumerate(ids):
+            db.execute("UPDATE products SET sort_order=? WHERE id=?", (i, pid))
+    return jsonify({"message": "تم إعادة الترتيب ✅"})
+
+
+@app.post("/api/admin/products/<int:pid>/move")
+@require_admin
+def adm_prod_move(pid):
+    """نقل منتج: {direction:-1|+1} يبدّله مع جاره بنفس النطاق (القسم+الفرع)،
+    أو {category, subsection_id} لنقله لأي مكان مع محتواه (فئاته تتبعه تلقائياً)."""
+    b = request.get_json(force=True, silent=True) or {}
+    with get_db() as db:
+        cur = db.execute("SELECT category,subsection_id,sort_order FROM products WHERE id=?", (pid,)).fetchone()
+        if not cur:
+            return jsonify({"message": "المنتج غير موجود"}), 404
+        # --- نقل لمكان آخر ---
+        if "category" in b or "subsection_id" in b:
+            new_cat = (b.get("category", cur[0]) or "").strip() or cur[0]
+            sec = db.execute("SELECT id FROM sections WHERE name=?", (new_cat,)).fetchone()
+            if not sec:
+                return jsonify({"message": "القسم غير موجود"}), 400
+            raw_sub = b.get("subsection_id", "__keep__")
+            if raw_sub == "__keep__":
+                new_sub = cur[1]
+            elif raw_sub in (None, "", 0, "0"):
+                new_sub = None
+            else:
+                try:
+                    new_sub = int(raw_sub)
+                except (TypeError, ValueError):
+                    return jsonify({"message": "القسم الفرعي غير صالح"}), 400
+            if new_sub is not None:
+                ok = db.execute("SELECT 1 FROM subsections WHERE id=? AND section_id=?", (new_sub, sec[0])).fetchone()
+                if not ok:
+                    return jsonify({"message": "القسم الفرعي لا ينتمي للقسم المختار"}), 400
+            try:
+                mx = db.execute("SELECT COALESCE(MAX(sort_order),-1) FROM products WHERE category=?", (new_cat,)).fetchone()[0]
+            except Exception:
+                mx = -1
+            db.execute("UPDATE products SET category=?,subsection_id=?,sort_order=? WHERE id=?",
+                       (new_cat, new_sub, int(mx or 0) + 1, pid))
+            return jsonify({"message": f"تم نقل المنتج إلى «{new_cat}» ✅"})
+        # --- تطليع/تنزيل ضمن نفس النطاق ---
+        try:
+            direction = int(b.get("direction", 0))
+        except (TypeError, ValueError):
+            return jsonify({"message": "الاتجاه غير صالح"}), 400
+        if direction not in (-1, 1):
+            return jsonify({"message": "الاتجاه غير صالح"}), 400
+        cat, sub = cur[0] or "", cur[1] if cur[1] else None
+        if sub is None:
+            rows = db.execute("SELECT id,sort_order FROM products WHERE category=? AND (subsection_id IS NULL OR subsection_id=0) ORDER BY sort_order,id",
+                              (cat,)).fetchall()
+        else:
+            rows = db.execute("SELECT id,sort_order FROM products WHERE category=? AND subsection_id=? ORDER BY sort_order,id",
+                              (cat, sub)).fetchall()
+        # تطبيع: منتجات قديمة قد تتشارك نفس sort_order — رقّمها تسلسلياً أولاً ليكون التبديل مرئياً
+        for i, r in enumerate(rows):
+            if (r[1] or 0) != i:
+                db.execute("UPDATE products SET sort_order=? WHERE id=?", (i, r[0]))
+        rows = [(r[0], i) for i, r in enumerate(rows)]
+        ids = [r[0] for r in rows]
+        if pid not in ids:
+            return jsonify({"message": "المنتج غير موجود"}), 404
+        idx = ids.index(pid)
+        j = idx + direction
+        if j < 0 or j >= len(ids):
+            return jsonify({"message": "وصل المنتج لأقصى موضعه في هذا النطاق"}), 400
+        a, c = rows[idx], rows[j]
+        db.execute("UPDATE products SET sort_order=? WHERE id=?", (c[1], a[0]))
+        db.execute("UPDATE products SET sort_order=? WHERE id=?", (a[1], c[0]))
+    return jsonify({"message": "تم النقل ✅"})
 
 @app.get("/api/admin/products/<int:pid>/skus")
 @require_admin
@@ -1832,6 +1936,40 @@ def adm_sub_ed(subid):
 def adm_sub_del(subid):
     with get_db() as db: db.execute("DELETE FROM subsections WHERE id=?", (subid,))
     return jsonify({"message": "تم الحذف"})
+
+
+@app.post("/api/admin/subsections/<int:subid>/move")
+@require_admin
+def adm_sub_move(subid):
+    """نقل فرع كامل لأي قسم مع كل محتواه (منتجاته وفئاتها تتبعه تلقائياً).
+    {section_id} — يُنقل الفرع لنهاية القسم الهدف، وتُحدَّث category منتجاته لاسم القسم الجديد."""
+    b = request.get_json(force=True, silent=True) or {}
+    try:
+        target = int(b.get("section_id"))
+    except (TypeError, ValueError):
+        return jsonify({"message": "اختر القسم الهدف"}), 400
+    with get_db() as db:
+        cur = db.execute("SELECT section_id,name FROM subsections WHERE id=?", (subid,)).fetchone()
+        if not cur:
+            return jsonify({"message": "القسم الفرعي غير موجود"}), 404
+        if int(cur[0]) == target:
+            return jsonify({"message": "الفرع موجود في هذا القسم أصلاً"}), 400
+        tgt = db.execute("SELECT name FROM sections WHERE id=?", (target,)).fetchone()
+        if not tgt:
+            return jsonify({"message": "القسم الهدف غير موجود"}), 400
+        try:
+            mx = db.execute("SELECT COALESCE(MAX(sort_order),-1) FROM subsections WHERE section_id=?", (target,)).fetchone()[0]
+        except Exception:
+            mx = -1
+        db.execute("UPDATE subsections SET section_id=?,sort_order=? WHERE id=?", (target, int(mx or 0) + 1, subid))
+        # منتجات الفرع تتبعه: حدّث اسم قسمها للاسم الجديد (مرتبطة بالاسم نصاً)
+        try:
+            c = db.execute("UPDATE products SET category=? WHERE subsection_id=?", (tgt[0], subid))
+            moved = c.rowcount or 0
+        except Exception:
+            moved = 0
+    return jsonify({"message": f"تم نقل الفرع «{cur[1]}» مع {moved} منتج إلى «{tgt[0]}» ✅",
+                    "moved_products": moved})
 
 # --- مستويات الخصم (VIP) ---
 @app.get("/api/admin/tiers")
@@ -3271,17 +3409,36 @@ def img_auto(rid): return _entity_image("deposit_auto", rid)
 def ai_gen():
     b = request.get_json(force=True, silent=True) or {}
     name = b.get("name") or b.get("product", "store banner")
+    kind = (b.get("kind") or "product").strip().lower() or "product"
+    if kind not in ("product", "section", "subsection", "category", "banner"):
+        kind = "product"
     url, key = (get_setting("ai_image_api_url", "") or "").strip(), (get_setting("ai_image_api_key", "") or "").strip()
     err_detail = ""
+    prompt_en, negative_en = "", ""
+    try:
+        from branding import to_english, image_prompt_payload
+        prompt_en, negative_en = image_prompt_payload(kind, name)
+        name_en = to_english(name)
+    except Exception:
+        name_en = (name or "store banner")
     if url and key:
-        # التوليد عبر API الخارجي أولاً
-        prompt = (b.get("prompt") or get_setting("ai_image_prompt_template", "")).replace("{product}", name)
+        # التوليد عبر API الخارجي أولاً — بالبرومبت الدقيق الإنجليزي الموحد
+        custom = (b.get("prompt") or "").strip()
+        if custom:
+            prompt = custom.replace("{product}", name_en).replace("{name}", name_en)
+        else:
+            prompt = (get_setting("ai_image_prompt_template", "") or "").strip()
+            if prompt:
+                prompt = prompt.replace("{product}", name_en).replace("{name}", name_en)
+            else:
+                prompt = prompt_en
         try:
             import requests as _rq
-            r = _rq.post(url, json={"prompt": prompt, "key": key}, timeout=25)
+            r = _rq.post(url, json={"prompt": prompt, "negative_prompt": negative_en, "key": key}, timeout=25)
             ok, img, err_detail = _extract_ai_image(r)
             if ok:
-                return jsonify({"message": "تم التوليد عبر API ✅", "image": img, "url": img})
+                return jsonify({"message": "تم التوليد عبر API ✅", "image": img, "url": img,
+                                "prompt": prompt, "name_en": name_en})
         except Exception as e:
             err_detail = f"تعذّر الاتصال بخدمة توليد الصور: {e}"
     # fallback: توليد محلي بهوية المتجر حتى لا يبقى المستخدم بلا صورة
@@ -3293,7 +3450,8 @@ def ai_gen():
         msg = f"المحرك الخارجي فشل ({err_detail}) — تم التوليد بهوية المتجر بدلاً منه ✅"
     else:
         msg = "تم التوليد بهوية المتجر ✅ (لا يوجد API خارجي مضبوط)"
-    return jsonify({"message": msg, "image": img, "url": img, "fallback": bool(err_detail)})
+    return jsonify({"message": msg, "image": img, "url": img, "fallback": bool(err_detail),
+                    "prompt": prompt_en, "name_en": name_en})
 
 
 def _extract_ai_image(r):
