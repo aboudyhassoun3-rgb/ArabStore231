@@ -639,8 +639,18 @@ async function loadProducts(){
   renderProductsTable(productsCache);
 }
 function renderProductsTable(products){
-  document.getElementById("productsTableBody").innerHTML = products.map(p=>`
+  // عرض مجمّع حسب القسم ثم الفرع ثم الترتيب الفعلي — لتكون أسهم التطليع/التنزيل مرئية المعنى
+  const rows = [...products].sort((a, b)=>{
+    if((a.category||"") !== (b.category||"")) return (a.category||"").localeCompare(b.category||"");
+    if((a.subsection_name||"") !== (b.subsection_name||"")) return (a.subsection_name||"").localeCompare(b.subsection_name||"");
+    return (a.sort_order||0) - (b.sort_order||0) || a.id - b.id;
+  });
+  document.getElementById("productsTableBody").innerHTML = rows.map((p, idx)=>`
     <tr>
+      <td style="white-space:nowrap;">
+        <button class="btn-sm" ${idx===0?'disabled':''} onclick="moveProduct(${p.id}, -1)" title="تطليع المنتج"><i class="fa-solid fa-arrow-up"></i></button>
+        <button class="btn-sm" ${idx===rows.length-1?'disabled':''} onclick="moveProduct(${p.id}, 1)" title="تنزيل المنتج"><i class="fa-solid fa-arrow-down"></i></button>
+      </td>
       <td>${p.image ? `<img src="${p.image}" style="width:30px; height:30px; border-radius:8px; object-fit:cover; vertical-align:middle; margin-left:6px;">` : ''}${p.name}</td>
       <td>${p.category}</td>
       <td>${p.subsection_name || '<span class="text-muted">—</span>'}</td>
@@ -649,11 +659,54 @@ function renderProductsTable(products){
         <button class="btn-sm" onclick="pickImage('product', ${p.id})"><i class="fa-solid fa-camera"></i></button>
         <button class="btn-sm" onclick="openAiImage('product', ${p.id}, '${p.name.replace(/'/g,"")}')" title="إنشاء صورة بالذكاء الاصطناعي"><i class="fa-solid fa-wand-magic-sparkles"></i></button>
         <button class="btn-sm" onclick="openProductEdit(${p.id})"><i class="fa-solid fa-pen"></i></button>
+        <button class="btn-sm" onclick="openProductMove(${p.id})" title="نقل المنتج لأي قسم/فرع"><i class="fa-solid fa-truck-fast"></i> نقل</button>
         <button class="btn-sm" onclick="openCategories(${p.id}, '${p.name.replace(/'/g,"")}')">الفئات</button>
         <button class="btn-sm danger" onclick="deleteProduct(${p.id})">حذف</button>
       </td>
     </tr>`).join("")
-    || `<tr><td colspan="5" class="text-muted" style="text-align:center; padding:16px;">${productsCache.length ? 'لا توجد نتائج مطابقة' : 'لا توجد منتجات بعد'}</td></tr>`;
+    || `<tr><td colspan="6" class="text-muted" style="text-align:center; padding:16px;">${productsCache.length ? 'لا توجد نتائج مطابقة' : 'لا توجد منتجات بعد'}</td></tr>`;
+}
+async function moveProduct(id, dir){
+  try{
+    const res = await adminFetch(`/admin/products/${id}/move`, { method:"POST", body: JSON.stringify({ direction: dir }) });
+    toast(res.message || "تم النقل ✅");
+    loadProducts();
+  }catch(err){ toast(err.message, "error"); }
+}
+/* نافذة نقل منتج لأي مكان مع محتواه (فئاته تتبعه تلقائياً — مربوطة بمعرفه) */
+async function openProductMove(id){
+  const p = productsCache.find(x=>x.id===id);
+  if(!p){ toast("المنتج غير موجود", "error"); return; }
+  editTarget = { kind:"product_move", id };
+  document.getElementById("editModalTitle").textContent = "نقل المنتج: " + p.name;
+  const body = document.getElementById("editModalBody");
+  const fld = "padding:11px;border-radius:11px;border:1px solid var(--border);background:var(--card-soft);color:var(--text);";
+  let secs = (typeof sectionsCache !== "undefined" && sectionsCache.length) ? sectionsCache : [];
+  if(!secs.length){
+    try{ secs = await adminFetch("/admin/sections"); }catch(err){ secs = []; }
+  }
+  const secOpts = secs.map(s=>`<option value="${escapeHtml(s.name)}" ${s.name===p.category?"selected":""}>${escapeHtml(s.name)}</option>`).join("")
+    || `<option value="">لا توجد أقسام</option>`;
+  body.innerHTML = `
+    <div class="field"><label>القسم الهدف (ينتقل المنتج لنهايته)</label><select id="mv_category" onchange="loadProductMoveSubs()" style="${fld}">${secOpts}</select></div>
+    <div class="field"><label>القسم الفرعي الهدف</label><select id="mv_subsection_id" style="${fld}"><option value="">— بدون قسم فرعي —</option></select></div>
+    <div class="info-banner" style="font-size:11px;"><i class="fa-solid fa-circle-info"></i><div>فئات المنتج وأسعاره ومخزونه تنتقل معه تلقائياً بدون أي فقدان.</div></div>`;
+  document.getElementById("editModal").style.display = "flex";
+  window._moveSections = secs;
+  await loadProductMoveSubs(p.subsection_id);
+}
+async function loadProductMoveSubs(selected){
+  const catEl = document.getElementById("mv_category");
+  const sel = document.getElementById("mv_subsection_id");
+  if(!catEl || !sel) return;
+  const secs = window._moveSections || (typeof sectionsCache !== "undefined" ? sectionsCache : []);
+  const sec = secs.find(s=>s.name===catEl.value);
+  sel.innerHTML = `<option value="">— بدون قسم فرعي —</option>`;
+  if(!sec) return;
+  try{
+    const subs = await adminFetch(`/admin/sections/${sec.id}/subsections`);
+    sel.innerHTML = `<option value="">— بدون قسم فرعي —</option>` + subs.map(s=>`<option value="${s.id}" ${s.id===(selected??null)?"selected":""}>${escapeHtml(s.name)}</option>`).join("");
+  }catch(err){ /* يبقى خيار "بدون" فقط */ }
 }
 function searchProducts(q){
   q = (q || "").trim().toLowerCase();
@@ -831,6 +884,7 @@ function renderSubsectionsTable(){
         <button class="btn-sm" onclick="pickImage('subsection', ${s.id})"><i class="fa-solid fa-camera"></i></button>
         <button class="btn-sm" onclick="openAiImage('subsection', ${s.id}, '${s.name.replace(/'/g,"")}')" title="إنشاء صورة بالذكاء الاصطناعي"><i class="fa-solid fa-wand-magic-sparkles"></i></button>
         <button class="btn-sm" onclick="openEdit('subsection', ${s.id}, '${s.name.replace(/'/g,"")}', {name:'${s.name.replace(/'/g,"")}', emoji:'${s.emoji||''}', active:${s.active}})"><i class="fa-solid fa-pen"></i></button>
+        <button class="btn-sm" onclick="openSubsectionMove(${s.id}, '${s.name.replace(/'/g,"")}')" title="نقل الفرع كاملاً مع محتواه لأي قسم"><i class="fa-solid fa-truck-fast"></i> نقل فرع</button>
         <button class="btn-sm danger" onclick="deleteSubsection(${s.id})">حذف</button>
       </td>
     </tr>`).join("")
@@ -862,6 +916,23 @@ async function addSubsection(){
 async function deleteSubsection(id){
   try{ await adminFetch(`/admin/subsections/${id}`, { method:"DELETE" }); toast("تم الحذف"); loadSubsections(); loadSections(); }
   catch(err){ toast(err.message, "error"); }
+}
+/* نافذة نقل فرع كامل مع كل محتواه (منتجاته وفئاتها) لأي قسم آخر */
+async function openSubsectionMove(id, name){
+  editTarget = { kind:"subsection_move", id };
+  document.getElementById("editModalTitle").textContent = "نقل الفرع: " + name;
+  const body = document.getElementById("editModalBody");
+  const fld = "padding:11px;border-radius:11px;border:1px solid var(--border);background:var(--card-soft);color:var(--text);";
+  let secs = (typeof sectionsListCache !== "undefined" && sectionsListCache.length) ? sectionsListCache : [];
+  if(!secs.length){
+    try{ secs = await adminFetch("/admin/sections"); }catch(err){ secs = []; }
+  }
+  const cur = (typeof subsectionsListCache !== "undefined" ? subsectionsListCache : []).find(s=>s.id===id);
+  body.innerHTML = `
+    <div class="field"><label>القسم الهدف (ينتقل الفرع لنهايته مع كل منتجاته)</label>
+      <select id="mv_target_section" style="${fld}">${secs.filter(s=>!cur || s.id!==cur.section_id).map(s=>`<option value="${s.id}">${escapeHtml(s.name)}</option>`).join("") || `<option value="">لا توجد أقسام أخرى</option>`}</select></div>
+    <div class="info-banner" style="font-size:11px;"><i class="fa-solid fa-circle-info"></i><div>الفرع ومنتجاته وفئاتها ينتقلون معاً بدون أي فقدان، ويُحفظ ترتيب المنتجات كما هو.</div></div>`;
+  document.getElementById("editModal").style.display = "flex";
 }
 
 /* ===== 7) طرق الإيداع ===== */
@@ -1040,7 +1111,9 @@ function openAiImage(kind, id, name){
   document.getElementById("aiImageTitle").textContent = "إنشاء صورة لـ: " + name;
   document.getElementById("aiImagePreview").style.display = "none";
   document.getElementById("aiImageConfirm").disabled = true;
-  document.getElementById("aiImageStatus").textContent = "اضغط «إنشاء صورة» ليبدأ التوليد التلقائي حسب الاسم.";
+  const pv = document.getElementById("aiImagePromptView");
+  if(pv) pv.style.display = "none";
+  document.getElementById("aiImageStatus").textContent = "اضغط «إنشاء صورة» — الاسم العربي يُحوَّل تلقائياً لإنجليزي فخم بهوية المتجر.";
   document.getElementById("aiImageModal").style.display = "flex";
 }
 function closeAiImage(){ document.getElementById("aiImageModal").style.display = "none"; aiImageTarget = null; }
@@ -1059,7 +1132,13 @@ async function generateAiImage(){
     img.src = res.url;
     img.style.display = "block";
     document.getElementById("aiImageConfirm").disabled = false;
-    status.textContent = "الصورة جاهزة — أكّدها أو أعد الإنشاء.";
+    status.textContent = res.message || "الصورة جاهزة — أكّدها أو أعد الإنشاء.";
+    const pv = document.getElementById("aiImagePromptView");
+    if(pv && (res.name_en || res.prompt)){
+      pv.style.display = "block";
+      pv.innerHTML = (res.name_en ? `<div style="margin-bottom:6px;">🏷️ <b dir="auto" style="color:var(--gold);">${escapeHtml(res.name_en)}</b> <span style="color:var(--muted);font-size:11px;">(الاسم بالإنجليزي داخل الصورة — بدون أي حرف عربي)</span></div>` : "")
+        + (res.prompt ? `<div style="font-size:11px;color:var(--muted);line-height:1.8;text-align:left;direction:ltr;">${escapeHtml(res.prompt)}</div>` : "");
+    }
   }catch(err){
     status.textContent = err.message;
     toast(err.message, "error");
@@ -1434,6 +1513,25 @@ function openEdit(kind, id, title, fields){
 async function saveEdit(){
   if(!editTarget) return;
   const { kind, id } = editTarget;
+  if(kind === "product_move"){
+    const category = document.getElementById("mv_category")?.value || "";
+    const subVal = document.getElementById("mv_subsection_id")?.value || "";
+    if(!category){ toast("اختر القسم الهدف", "error"); return; }
+    try{
+      const res = await adminFetch(`/admin/products/${id}/move`, { method:"POST", body: JSON.stringify({ category, subsection_id: subVal === "" ? null : Number(subVal) }) });
+      toast(res.message || "تم النقل ✅"); closeEdit(); loadProducts();
+    }catch(err){ toast(err.message, "error"); }
+    return;
+  }
+  if(kind === "subsection_move"){
+    const section_id = Number(document.getElementById("mv_target_section")?.value || 0);
+    if(!section_id){ toast("اختر القسم الهدف", "error"); return; }
+    try{
+      const res = await adminFetch(`/admin/subsections/${id}/move`, { method:"POST", body: JSON.stringify({ section_id }) });
+      toast(res.message || "تم النقل ✅"); closeEdit(); loadSubsections(); loadSections();
+    }catch(err){ toast(err.message, "error"); }
+    return;
+  }
   const eps = { product:`/admin/products/${id}`, category:`/admin/categories/${id}`, section:`/admin/sections/${id}`, subsection:`/admin/subsections/${id}`, manual_method:`/admin/deposit-methods/manual/${id}`, auto_method:`/admin/deposit-methods/auto/${id}` };
   const inputs = document.querySelectorAll("#editModalBody input, #editModalBody select, #editModalBody textarea");
   const b = {};
@@ -1446,7 +1544,7 @@ async function saveEdit(){
   try{
     const res = await adminFetch(eps[kind], { method:"PUT", body: JSON.stringify(b) });
     toast((res && res.message) || "تم التعديل ✅"); closeEdit();
-    if(kind==="product") loadProducts();
+    if(kind==="product" || kind==="product_move") loadProducts();
     if(kind==="category") loadCategories();
     if(kind==="section") loadSections();
     if(kind==="subsection") loadSubsections();

@@ -534,7 +534,7 @@
                style="width:100%; padding:11px; margin-bottom:12px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); box-sizing:border-box;">
         <div class="table-scroll">
           <table class="data-table">
-            <thead><tr><th>المنتج</th><th>القسم</th><th>القسم الفرعي</th><th>عدد الفئات</th><th>إجراء</th></tr></thead>
+            <thead><tr><th>الترتيب</th><th>المنتج</th><th>القسم</th><th>القسم الفرعي</th><th>عدد الفئات</th><th>إجراء</th></tr></thead>
             <tbody id="productsTableBody"></tbody>
           </table>
         </div>
@@ -757,6 +757,7 @@
   <div style="background:var(--card); border:1px solid var(--border); border-radius:16px; padding:18px; width:100%; max-width:420px; text-align:center;">
     <div id="aiImageTitle" style="font-weight:800; font-size:14px; margin-bottom:10px;">إنشاء صورة</div>
     <img id="aiImagePreview" src="" alt="" style="display:none; width:100%; border-radius:12px; margin-bottom:10px;">
+    <div id="aiImagePromptView" style="display:none; background:var(--card-soft); border:1px solid var(--border); border-radius:12px; padding:10px 12px; margin-bottom:10px; text-align:right;"></div>
     <div id="aiImageStatus" style="font-size:12px; color:var(--muted); margin-bottom:12px;"></div>
     <div style="display:flex; gap:8px; flex-wrap:wrap; justify-content:center;">
       <button class="btn-sm primary" onclick="generateAiImage()"><i class="fa-solid fa-wand-magic-sparkles"></i> إنشاء / إعادة إنشاء</button>
