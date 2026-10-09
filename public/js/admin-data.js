@@ -988,11 +988,24 @@ async function loadProviders(){
     <tr><td>${p.name}${p.has_token ? "" : ' <span style="color:var(--danger);" title="هذا المزوّد بلا توكن — الطلبات المرتبطة به لن تذهب للـ API">⚠️ بلا توكن</span>'}</td><td style="font-family:'Orbitron',monospace; font-size:10px;">${p.api_url}</td><td>${p.linked_products}</td>
     <td><input type="number" id="importMargin_${p.id}" placeholder="10" min="0" step="0.5" style="width:70px; padding:7px; border-radius:8px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); font-size:11px;"></td>
     <td style="display:flex; gap:6px; flex-wrap:wrap;">
+      <button class="btn-sm" onclick="testProvider(${p.id}, this)"><i class="fa-solid fa-stethoscope"></i> فحص الاتصال</button>
       <button class="btn-sm primary" onclick="importProviderCatalog(${p.id}, '${p.name.replace(/'/g,"")}')"><i class="fa-solid fa-cloud-arrow-down"></i> استيراد الكل</button>
       <button class="btn-sm" onclick="exportProviderProducts(${p.id}, '${p.name.replace(/'/g,"")}')"><i class="fa-solid fa-file-arrow-down"></i> تحميل قائمة المنتجات</button>
       <button class="btn-sm danger" onclick="deleteProvider(${p.id})">حذف</button>
     </td></tr>`).join("")
     || `<tr><td colspan="5" class="text-muted" style="text-align:center; padding:16px;">لا يوجد مزوّدون بعد</td></tr>`;
+}
+
+async function testProvider(pid, btn){
+  const orig = btn ? btn.innerHTML : "";
+  if(btn){ btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> جاري الفحص...'; }
+  try{
+    const r = await adminFetch(`/admin/providers/${pid}/test`, { method:"POST" });
+    const lines = (r.checks || []).map(c=>`• ${c.label}: ${c.verdict}\n  ${c.url}`).join("\n");
+    alert(`${r.message}\n\n${lines}\n\nالمنتجات المرصودة: ${r.products_found ?? 0}\nرابط الطلب: ${r.order_url}`);
+    loadProviders();
+  }catch(err){ toast(err.message, "error"); }
+  finally{ if(btn){ btn.disabled = false; btn.innerHTML = orig; } }
 }
 
 async function exportProviderProducts(providerId, providerName){

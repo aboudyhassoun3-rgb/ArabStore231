@@ -679,7 +679,8 @@ def provider_buy(sku_row, player, qty, token=None, url=None, product_ref=None, o
             import requests as _rq
             payload = {"token": tok, "api_token": tok, "product_id": product_ref,
                        "player_id": player, "player": player, "qty": qty, "quantity": qty}
-            r = _rq.post(_pjoin(base, order_path, "/api/order"), json=payload, timeout=10)
+            endpoint = _pjoin(base, order_path, "/api/order")
+            r = _rq.post(endpoint, json=payload, timeout=10)
             if r.ok:
                 try: d = r.json()
                 except Exception: d = {}
@@ -689,7 +690,8 @@ def provider_buy(sku_row, player, qty, token=None, url=None, product_ref=None, o
                     if ok: return True, str(oid or f"PV-{uuid.uuid4().hex[:8]}"), r.text[:500]
                     return False, "", str(d.get("message", r.text))[:500]
                 return True, f"PV-{uuid.uuid4().hex[:8]}", r.text[:500]
-            return False, "", f"provider-http-{r.status_code}"
+            hint = " — تحقق من مسار الطلب في إعدادات المزوّد" if r.status_code == 404 else ""
+            return False, "", f"provider-http-{r.status_code} @ {endpoint}{hint}"
         except Exception as e: return False, "", f"provider-error: {e}"
     return True, f"LOCAL-{uuid.uuid4().hex[:8]}", "تم التنفيذ محلياً (لا يوجد مزوّد مربوط)"
 
@@ -2624,10 +2626,75 @@ def _provider_products(prov):
 @app.get("/api/admin/providers/<int:pid>/products")
 @require_admin
 def adm_prov_prods(pid):
-    with get_db() as db:
-        p = db.execute("SELECT id,token,url FROM providers WHERE id=?", (pid,)).fetchone()
+    p = _get_provider(pid)
     if not p: return jsonify({"message": "غير موجود"}), 404
     return jsonify([{"id": x.get("id", ""), "name": x.get("name", ""), "price": x.get("price", 0)} for x in _provider_products(p)])
+
+@app.post("/api/admin/providers/<int:pid>/test")
+@require_admin
+def adm_prov_test(pid):
+    """فحص اتصال المزوّد — قراءة فقط وآمن تماماً (لا يُنشئ أي طلب حقيقي).
+    يجرّب مسار الكتالوج ومسار الحالة ويكشف إن كان المسار نفسه خطأ (404 بصفحة HTML)
+    أم أن المسار صحيح والمشكلة في التوكن/البيانات (رد JSON)."""
+    import requests as _rq
+    prov = _get_provider(pid)
+    if not prov:
+        return jsonify({"message": "المزوّد غير موجود"}), 404
+    tok = (prov.get("token") or "").strip()
+    if not tok:
+        return jsonify({"message": "المزوّد بلا توكن — أضف التوكن أولاً"}), 400
+    base = (prov.get("url") or "").strip().rstrip("/")
+    if not base:
+        return jsonify({"message": "المزوّد بلا رابط — أضف الرابط أولاً"}), 400
+    checks = []
+
+    def _probe(label, method, url, **kw):
+        try:
+            r = _rq.request(method, url, timeout=8, **kw)
+            try:
+                d = r.json()
+                is_json = True
+            except Exception:
+                d, is_json = None, False
+            if r.status_code == 404 and not is_json:
+                verdict = f"❌ المسار خطأ (لا يوجد شيء على هذا الرابط) — صحّح مسار {label} في إعدادات المزوّد"
+                ok = False
+            elif is_json:
+                verdict = f"✅ المسار صحيح ويرد JSON (رمز {r.status_code})"
+                ok = True
+            else:
+                verdict = f"⚠️ يرد (رمز {r.status_code}) لكن ليس JSON — راجع شكل الرد"
+                ok = r.ok
+            return {"label": label, "url": url, "http": r.status_code,
+                    "json": is_json, "ok": ok, "verdict": verdict,
+                    "sample": (str(d)[:200] if is_json else (r.text or "")[:200])}
+        except Exception as e:
+            return {"label": label, "url": url, "http": None,
+                    "json": False, "ok": False,
+                    "verdict": f"❌ تعذّر الوصول: {e} — تحقق من الرابط والإنترنت",
+                    "sample": ""}
+
+    checks.append(_probe("الكتالوج", "POST", _pjoin(base, prov.get("catalog_path", ""), "/products"),
+                         json={"token": tok}))
+    checks.append(_probe("الحالة", "GET", _pjoin(base, prov.get("status_path", ""), "/api/order-status"),
+                         params={"token": tok, "order_id": "TEST-PROBE-000"}))
+    n_products = 0
+    try:
+        items = _provider_products(prov)
+        n_products = len(items)
+    except Exception:
+        pass
+    all_ok = all(c["ok"] for c in checks)
+    return jsonify({
+        "message": "الاتصال سليم ✅ — المسارات تعمل" if all_ok else "يوجد خلل — راجع تفاصيل الفحص بالأسفل",
+        "ok": all_ok,
+        "catalog_url": _pjoin(base, prov.get("catalog_path", ""), "/products"),
+        "order_url": _pjoin(base, prov.get("order_path", ""), "/api/order"),
+        "status_url": _pjoin(base, prov.get("status_path", ""), "/api/order-status"),
+        "products_found": n_products,
+        "checks": checks,
+    })
+
 
 @app.get("/api/admin/categories/<int:cid>/link")
 @require_admin
@@ -2642,8 +2709,7 @@ def adm_link_get(cid):
 def adm_prov_import(pid):
     b = request.get_json(force=True, silent=True) or {}
     margin = float(b.get("margin_percent") or b.get("margin") or 20)
-    with get_db() as db:
-        p = db.execute("SELECT id,token,url FROM providers WHERE id=?", (pid,)).fetchone()
+    p = _get_provider(pid)
     if not p: return jsonify({"message": "غير موجود"}), 404
     items = _provider_products(p)
     if not items: return jsonify({"message": "تعذّر جلب كتالوج المزوّد"}), 502
