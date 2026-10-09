@@ -666,6 +666,12 @@
           <input type="text" id="providerToken" placeholder="API Token" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);">
           <input type="text" id="providerUrl" placeholder="API URL" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);">
         </div>
+        <div class="field-hint" style="margin:8px 0 6px;">اترك الحقول التالية فاضية ليعمل مع شمس تلقائياً بلا أي إعداد. املأها فقط إذا كان مزوّدك يستخدم مسارات مختلفة عن نمط <code>client/api</code>.</div>
+        <div class="admin-fields-grid">
+          <input type="text" id="providerOrderPath" placeholder="مسار الطلب: ‎/api/order" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);">
+          <input type="text" id="providerStatusPath" placeholder="مسار الحالة: ‎/api/order-status" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);">
+          <input type="text" id="providerCatalogPath" placeholder="مسار الكتالوج: ‎/products" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);">
+        </div>
         <button class="btn btn-primary mt-10" style="width:auto; padding:10px 18px;" onclick="addProvider()"><i class="fa-solid fa-plus"></i> إضافة مزوّد جديد</button>
       </div>
       <div class="panel">

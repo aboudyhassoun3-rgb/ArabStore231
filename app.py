@@ -286,7 +286,11 @@ def init_db():
                     "ALTER TABLE orders ADD COLUMN cost_usd REAL DEFAULT 0",
                     "ALTER TABLE tiers ADD COLUMN sort_order INTEGER DEFAULT 0",
                     "ALTER TABLE web_admins ADD COLUMN added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
-                    "ALTER TABLE products ADD COLUMN notes TEXT DEFAULT ''"])
+                    "ALTER TABLE products ADD COLUMN notes TEXT DEFAULT ''",
+                    "ALTER TABLE orders ADD COLUMN provider_id INTEGER DEFAULT NULL",
+                    "ALTER TABLE providers ADD COLUMN order_path TEXT DEFAULT ''",
+                    "ALTER TABLE providers ADD COLUMN status_path TEXT DEFAULT ''",
+                    "ALTER TABLE providers ADD COLUMN catalog_path TEXT DEFAULT ''"])
         # settings defaults
         defaults = {"exchange_rate": "13800", "support_username": "aboudy2312",
                     "support_telegram": "https://t.me/aboudy2312", "support_whatsapp": "",
@@ -571,72 +575,258 @@ def require_admin(f):
         request.ap = p; return f(*a, **kw)
     return w
 
+_MIME_BY_EXT = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "webp": "image/webp", "gif": "image/gif", "svg": "image/svg+xml"}
+
+def _put_site_file(name, data_bytes, mime):
+    """نسخة دائمة من الملف داخل قاعدة البيانات — تنجو من فقدان /tmp على Vercel."""
+    try:
+        import base64 as _b64
+        b64 = _b64.b64encode(data_bytes).decode("ascii")
+        with get_db() as db:
+            if USE_PG:
+                db.execute("INSERT INTO site_files(name,data,mime) VALUES(?,?,?) "
+                           "ON CONFLICT(name) DO UPDATE SET data=excluded.data, mime=excluded.mime, created_at=CURRENT_TIMESTAMP",
+                           (name, b64, mime))
+            else:
+                db.execute("INSERT OR REPLACE INTO site_files(name,data,mime,created_at) VALUES(?,?,?,CURRENT_TIMESTAMP)",
+                           (name, b64, mime))
+    except Exception as e:
+        print(f"WARNING: site_files store failed: {e}")
+
+
+def _get_site_file(name):
+    """يرجع (bytes, mime) أو (None, None)."""
+    try:
+        with get_db() as db:
+            r = db.execute("SELECT data, mime FROM site_files WHERE name=?", (name,)).fetchone()
+        if not r or not r[0]:
+            return None, None
+        import base64 as _b64
+        return _b64.b64decode(r[0]), (r[1] or "image/png")
+    except Exception:
+        return None, None
+
+
 def save_upload(fs):
     if not fs or not fs.filename: return ""
     ext = fs.filename.rsplit(".", 1)[-1].lower() if "." in fs.filename else ""
     if ext not in ALLOWED_IMG: return ""
     name = f"{uuid.uuid4().hex}.{ext}"
-    # supabase?
+    mime = (getattr(fs, "mimetype", "") or "").strip() or _MIME_BY_EXT.get(ext, "image/png")
+    try:
+        data = fs.read()
+    except Exception:
+        data = b""
+    if not data: return ""
+    # supabase? (تخزين دائم خارجي — لا حاجة لنسخة DB)
     surl, skey = os.environ.get("SUPABASE_URL", "").strip().rstrip("/"), os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
     bucket = os.environ.get("ARAB_STORAGE_BUCKET", "store-assets").strip() or "store-assets"
     if surl and skey:
         try:
             import requests as _rq
-            data = fs.read()
             r = _rq.post(f"{surl}/storage/v1/object/{bucket}/{name}",
                          headers={"Authorization": f"Bearer {skey}", "apikey": skey,
-                                  "Content-Type": fs.mimetype or "image/png", "x-upsert": "true"},
-                          data=data, timeout=8)
+                                  "Content-Type": mime, "x-upsert": "true"},
+                         data=data, timeout=8)
             r.raise_for_status()
             return f"{surl}/storage/v1/object/public/{bucket}/{name}"
         except Exception: pass
-    fs.stream.seek(0) if hasattr(fs.stream, "seek") else None
-    try: fs.save(os.path.join(UPLOAD_DIR, secure_filename(name)))
+    safe = secure_filename(name)
+    try:
+        with open(os.path.join(UPLOAD_DIR, safe), "wb") as fh: fh.write(data)
     except Exception:
-        with open(os.path.join(UPLOAD_DIR, secure_filename(name)), "wb") as fh: fh.write(fs.read())
-    return f"/uploads/{secure_filename(name)}"
+        try: fs.save(os.path.join(UPLOAD_DIR, safe))
+        except Exception: return ""
+    # نسخة DB دائمة — هي ما يجعل الشعار ثابتاً على Vercel بعد اختفاء /tmp
+    _put_site_file(safe, data, mime)
+    return f"/uploads/{safe}"
 
 # provider (real attempt + graceful mock)
-def provider_buy(sku_row, player, qty, token=None, url=None, product_ref=None):
+def _pjoin(base, path, default):
+    """يبني رابط المزوّد مع مسار قابل للضبط لكل مزوّد (وإلا الافتراضي)."""
+    base = ((base or "").strip().rstrip("/") or "https://api.shams4store.com")
+    p = ((path or "").strip() or default)
+    if not p.startswith("/"):
+        p = "/" + p
+    return base + p
+
+
+def _get_provider(pid):
+    """يرجع قاموس المزوّد أو None — متوافق مع القواعد القديمة (بدون أعمدة المسارات)."""
+    try:
+        with get_db() as db:
+            try:
+                r = db.execute("SELECT id,name,token,url,order_path,status_path,catalog_path FROM providers WHERE id=?", (pid,)).fetchone()
+                if r:
+                    return {"id": r[0], "name": r[1], "token": r[2] or "", "url": r[3] or "",
+                            "order_path": r[4] or "", "status_path": r[5] or "", "catalog_path": r[6] or ""}
+            except Exception:
+                r = db.execute("SELECT id,name,token,url FROM providers WHERE id=?", (pid,)).fetchone()
+                if r:
+                    return {"id": r[0], "name": r[1], "token": r[2] or "", "url": r[3] or "",
+                            "order_path": "", "status_path": "", "catalog_path": ""}
+    except Exception:
+        pass
+    return None
+
+
+def _shams_buy(base, tok, product_ref, player, qty):
+    """طلب عبر نمط client/api (شمس وأشباهه: نفس بروتوكول متاجر الشحن).
+    يرجع (ok, status, porder, resp) حيث status: completed|pending|failed."""
+    import requests as _rq
+    if not (product_ref or "").strip():
+        return False, "failed", "", "الربط ناقص: لا يوجد آيدي منتج المزوّد — أعد الربط من لوحة المزوّدين"
+    ouuid = f"ARAB-{uuid.uuid4().hex}"
+    url = base.rstrip("/") + f"/client/api/newOrder/{product_ref}/params"
+    try:
+        r = _rq.get(url, headers={"api-token": tok},
+                    params={"qty": qty, "playerId": player, "order_uuid": ouuid}, timeout=12)
+    except Exception as e:
+        return False, "pending", "", f"provider-error: {e}"
+    if not r.ok:
+        if r.status_code in (401, 403):
+            return False, "failed", "", f"توكن المزوّد مرفوض (رمز {r.status_code}) — تحقق من التوكن في إعدادات المزوّد"
+        hint = " — تحقق من رابط المزوّد" if r.status_code == 404 else ""
+        return False, "pending", "", f"provider-http-{r.status_code} @ {url}{hint}"
+    try:
+        d = r.json()
+    except Exception:
+        return False, "pending", "", "رد غير صالح من المزوّد (ليس JSON)"
+    if not isinstance(d, dict) or d.get("status") != "OK":
+        msg = ""
+        if isinstance(d, dict):
+            msg = str(d.get("msg") or d.get("message") or "")
+        return False, "failed", "", f"المزوّد رفض الطلب: {msg or r.text[:200]}"
+    data = d.get("data") or {}
+    oid = str(data.get("order_id") or "")
+    pst = str(data.get("status") or "").lower()
+    replay = data.get("replay_api") or []
+    # إن كانت القائمة فارغة (شائع عند الإنشاء: wait بلا رد بعد) لا نخزّن JSON خاماً قبيحاً —
+    # سيصل الرد الحقيقي لاحقاً عبر التحديث ويُعرض منظماً
+    reply = " | ".join(str(x) for x in replay if x)
+    if pst in ("accept", "completed", "success"):
+        return True, "completed", oid or f"PV-{uuid.uuid4().hex[:8]}", reply[:500]
+    if pst in ("failed", "rejected", "reject", "error"):
+        return False, "failed", oid, reply[:500]
+    return True, "pending", oid or f"PV-{uuid.uuid4().hex[:8]}", reply[:500]
+
+
+def _shams_check(base, tok, porder):
+    """متابعة طلب عبر نمط client/api. يرجع (status, reply)."""
+    import requests as _rq
+    import json as _j
+    url = base.rstrip("/") + "/client/api/check"
+    for params in ({"orders": _j.dumps([porder])},
+                   {"orders": _j.dumps([porder]), "uuid": "1"}):
+        try:
+            r = _rq.get(url, headers={"api-token": tok}, params=params, timeout=10)
+        except Exception:
+            return "pending", ""
+        if not r.ok:
+            continue
+        try:
+            d = r.json()
+        except Exception:
+            continue
+        if not isinstance(d, dict) or d.get("status") != "OK":
+            continue
+        rows = d.get("data") or []
+        if not rows:
+            continue
+        row = rows[0]
+        pst = str(row.get("status") or "").lower()
+        replay = row.get("replay_api") or []
+        reply = " | ".join(str(x) for x in replay if x)
+        if pst in ("accept", "completed", "success"):
+            return "completed", reply[:500]
+        if pst in ("failed", "rejected", "reject", "error"):
+            return "failed", reply[:500]
+        return "pending", reply[:500]
+    return "pending", ""
+
+
+def provider_buy(sku_row, player, qty, token=None, url=None, product_ref=None, order_path=""):
+    """يرجع (ok, status, porder, resp) حيث status: completed|pending|failed.
+    بدون مسار مخصص: نمط client/api (شمس) مباشرة بلا أي إعداد إضافي.
+    مع مسار مخصص: POST القديم للتوافق."""
     tok = (token or PROVIDER_TOKEN or "").strip()
     base = ((url or PROVIDER_URL or "").strip().rstrip("/") or "https://api.shams4store.com")
-    if tok:
+    if not tok:
+        return True, "completed", f"LOCAL-{uuid.uuid4().hex[:8]}", "تم التنفيذ محلياً (لا يوجد مزوّد مربوط)"
+    if (order_path or "").strip():
         try:
             import requests as _rq
             payload = {"token": tok, "api_token": tok, "product_id": product_ref,
                        "player_id": player, "player": player, "qty": qty, "quantity": qty}
-            r = _rq.post(f"{base}/api/order", json=payload, timeout=10)
+            endpoint = _pjoin(base, order_path, "/api/order")
+            r = _rq.post(endpoint, json=payload, timeout=10)
             if r.ok:
                 try: d = r.json()
                 except Exception: d = {}
                 if isinstance(d, dict):
                     oid = d.get("order_id") or d.get("id") or (d.get("data") or {}).get("order_id") if isinstance(d.get("data"), dict) else d.get("order_id")
                     ok = d.get("status") not in ("error", "failed") and (d.get("status", "OK") in ("OK", "success", "accept", "processing", "completed") or oid)
-                    if ok: return True, str(oid or f"PV-{uuid.uuid4().hex[:8]}"), r.text[:500]
-                    return False, "", str(d.get("message", r.text))[:500]
-                return True, f"PV-{uuid.uuid4().hex[:8]}", r.text[:500]
-            return False, "", f"provider-http-{r.status_code}"
-        except Exception as e: return False, "", f"provider-error: {e}"
-    return True, f"LOCAL-{uuid.uuid4().hex[:8]}", "تم التنفيذ محلياً (لا يوجد مزوّد مربوط)"
+                    if ok: return True, "completed", str(oid or f"PV-{uuid.uuid4().hex[:8]}"), r.text[:500]
+                    return False, "failed", "", str(d.get("message", r.text))[:500]
+                return True, "completed", f"PV-{uuid.uuid4().hex[:8]}", r.text[:500]
+            hint = " — تحقق من مسار الطلب في إعدادات المزوّد" if r.status_code == 404 else ""
+            return False, "pending", "", f"provider-http-{r.status_code} @ {endpoint}{hint}"
+        except Exception as e: return False, "pending", "", f"provider-error: {e}"
+    return _shams_buy(base, tok, product_ref, player, qty)
 
 def sku_provider(sku_id):
-    """يرجع (token, url, provider_product) للباقة المرتبطة أو (None,None,None)."""
+    """يرجع (token, url, provider_product, provider_id, order_path, status_path, linked)
+    للباقة — و(None,None,None,None,"","",False) عند غياب الربط تماماً.
+    linked=True مع توكن فارغ تعني ربطاً معطوباً يجب إصلاحه لا تجاهله."""
+    empty = (None, None, None, None, "", "", False)
     try:
         with get_db() as db:
-            r = db.execute("SELECT p.token,p.url,l.provider_product FROM category_links l JOIN providers p ON p.id=l.provider_id WHERE l.category_id=?", (sku_id,)).fetchone()
-        return (r[0], r[1], r[2]) if r else (None, None, None)
+            try:
+                r = db.execute("SELECT p.token,p.url,l.provider_product,l.provider_id,p.order_path,p.status_path "
+                               "FROM category_links l JOIN providers p ON p.id=l.provider_id WHERE l.category_id=?",
+                               (sku_id,)).fetchone()
+                if r:
+                    return (r[0], r[1], r[2], r[3], r[4] or "", r[5] or "", True)
+            except Exception:
+                r = db.execute("SELECT p.token,p.url,l.provider_product,l.provider_id FROM category_links l "
+                               "JOIN providers p ON p.id=l.provider_id WHERE l.category_id=?", (sku_id,)).fetchone()
+                if r:
+                    return (r[0], r[1], r[2], r[3], "", "", True)
+            # ربط موجود لكن المزوّد نفسه محذوف؟ اعتبره مربوطاً معطوباً
+            try:
+                if db.execute("SELECT 1 FROM category_links WHERE category_id=?", (sku_id,)).fetchone():
+                    return (None, None, None, None, "", "", True)
+            except Exception:
+                pass
+        return empty
     except Exception:
-        return (None, None, None)
+        return empty
 
-def provider_status(porder):
-    if not porder or porder.startswith("LOCAL-"): return "completed"
-    if PROVIDER_TOKEN:
+def provider_status(porder, provider_id=None):
+    """يرجع (status, reply) — reply هو رد المزوّد (الرقم/الكود) عند توفره."""
+    if not porder or porder.startswith("LOCAL-"): return "completed", ""
+    # أولاً: بيانات مزوّد هذا الطلب نفسه — وإلا لا يمكن متابعة الطلبات المرتبطة
+    tok, base, spath, custom = None, None, "", False
+    if provider_id:
+        prov = _get_provider(provider_id)
+        if prov and (prov.get("token") or "").strip():
+            tok = prov["token"].strip()
+            base = prov.get("url") or ""
+            spath = prov.get("status_path", "") or ""
+            custom = bool(spath.strip())
+    if not tok and PROVIDER_TOKEN:
+        tok, base = PROVIDER_TOKEN, PROVIDER_URL
+    if not tok:
+        return "completed", ""
+    if custom:
         try:
             import requests as _rq
-            r = _rq.get(f"{PROVIDER_URL}/api/order-status", params={"token": PROVIDER_TOKEN, "order_id": porder}, timeout=8)
-            if r.ok: return str(r.json().get("status", "pending"))
+            r = _rq.get(_pjoin(base, spath, "/api/order-status"), params={"token": tok, "order_id": porder}, timeout=8)
+            if r.ok: return str(r.json().get("status", "pending")), ""
         except Exception: pass
-    return "completed"
+        return "pending", ""
+    return _shams_check(base, tok, porder)
 
 # ---------- maintenance guard ----------
 @app.before_request
@@ -847,14 +1037,18 @@ def skus():
                     **({"original_price_usd": base, "discount_percent": disc} if disc else {})})
     return jsonify(out)
 
-def _insert_order(db, uid, pname, sname, price_usd, price_syp, player, qty, status, porder, resp, ouuid, cost_usd=0):
-    vals = (uid, pname, sname, price_usd, price_syp, player, qty, status, porder, (resp or "")[:500], ouuid, round(float(cost_usd or 0), 4))
+def _insert_order(db, uid, pname, sname, price_usd, price_syp, player, qty, status, porder, resp, ouuid, cost_usd=0, provider_id=None):
+    vals = (uid, pname, sname, price_usd, price_syp, player, qty, status, porder, (resp or "")[:500], ouuid, round(float(cost_usd or 0), 4), provider_id)
     try:
-        cur = db.execute("INSERT INTO orders(user_id,product,sku,price_usd,price_syp,player,qty,status,provider_order,response,order_uuid,cost_usd) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id" if USE_PG
-                         else "INSERT INTO orders(user_id,product,sku,price_usd,price_syp,player,qty,status,provider_order,response,order_uuid,cost_usd) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", vals)
+        cur = db.execute("INSERT INTO orders(user_id,product,sku,price_usd,price_syp,player,qty,status,provider_order,response,order_uuid,cost_usd,provider_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id" if USE_PG
+                         else "INSERT INTO orders(user_id,product,sku,price_usd,price_syp,player,qty,status,provider_order,response,order_uuid,cost_usd,provider_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)", vals)
     except Exception:
-        cur = db.execute("INSERT INTO orders(user_id,product,sku,price_usd,price_syp,player,qty,status,provider_order,response,order_uuid) VALUES(?,?,?,?,?,?,?,?,?,?,?) RETURNING id" if USE_PG
-                         else "INSERT INTO orders(user_id,product,sku,price_usd,price_syp,player,qty,status,provider_order,response,order_uuid) VALUES(?,?,?,?,?,?,?,?,?,?,?)", vals[:-1])
+        try:
+            cur = db.execute("INSERT INTO orders(user_id,product,sku,price_usd,price_syp,player,qty,status,provider_order,response,order_uuid,cost_usd) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id" if USE_PG
+                             else "INSERT INTO orders(user_id,product,sku,price_usd,price_syp,player,qty,status,provider_order,response,order_uuid,cost_usd) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)", vals[:-1])
+        except Exception:
+            cur = db.execute("INSERT INTO orders(user_id,product,sku,price_usd,price_syp,player,qty,status,provider_order,response,order_uuid) VALUES(?,?,?,?,?,?,?,?,?,?,?) RETURNING id" if USE_PG
+                             else "INSERT INTO orders(user_id,product,sku,price_usd,price_syp,player,qty,status,provider_order,response,order_uuid) VALUES(?,?,?,?,?,?,?,?,?,?,?)", vals[:-2])
     return cur.fetchone()[0] if USE_PG else cur.lastrowid
 
 # ================= WALLET / DEPOSIT =================
@@ -971,16 +1165,17 @@ def order_create():
         price_usd = round(float(s[3]) * (1 - disc / 100), 4); r = rate(); price_syp = int(price_usd * r * qty)
         bal = balance_of(uid)
         if bal < price_syp: return jsonify({"message": f"رصيدك غير كافٍ ({bal:,} ل.س). اشحن محفظتك أولاً 💳"}), 402
-        _ptok, _purl, _ppid = sku_provider(s[0])
-        ok, porder, resp = provider_buy(s, player, qty, _ptok, _purl, _ppid)
-        status = "completed" if ok else ("pending" if _ptok else "failed")
+        _ptok, _purl, _ppid, _pvid, _popath, _pspath, _linked = sku_provider(s[0])
+        if _linked and not (_ptok or "").strip():
+            return jsonify({"message": "هذا المنتج مربوط بمزوّد لكن بياناته ناقصة (توكن فارغ) — أعد إدخال التوكن من لوحة المزوّدين ثم أعد الربط، ولن يتم التنفيذ محلياً"}), 400
+        ok, status, porder, resp = provider_buy(s, player, qty, _ptok, _purl, _ppid, _popath)
         if status == "pending":
             notify(0, "طلب معلّق يحتاج تنفيذ ⏳", f"{pname} — {s[2]} — {player}", "info")
         if s[4] is not None: db.execute("UPDATE skus SET stock_qty=stock_qty-1 WHERE id=?", (s[0],))
         db.execute("UPDATE balances SET balance=balance-? WHERE user_id=?", (price_syp, uid))
         db.execute("INSERT INTO transactions(user_id,type,amount,note) VALUES(?, 'out', ?, ?)", (uid, -price_syp, f"شراء {pname} — {s[2]}"))
         _cost = float(s[6] if len(s) > 6 and s[6] else (s[3] or 0)) * qty
-        oid = _insert_order(db, uid, pname, s[2], price_usd * qty, price_syp, player, qty, status, porder, resp, ouuid or f"{uid}-{int(time.time())}", _cost)
+        oid = _insert_order(db, uid, pname, s[2], price_usd * qty, price_syp, player, qty, status, porder, resp, ouuid or f"{uid}-{int(time.time())}", _cost, _pvid)
         notify(uid, "طلب جديد 🛒", f"{pname} — {s[2]} — {status}", "success" if ok else "error")
     return jsonify({"message": "تم تنفيذ طلبك بنجاح ✅", "order_id": oid, "status": status})
 
@@ -989,11 +1184,26 @@ def order_create():
 def order_refresh(oid):
     uid = int(request.wu["site_user_id"] if "site_user_id" in request.wu.keys() else request.wu[4])
     with get_db() as db:
-        o = db.execute("SELECT provider_order,status,price_syp FROM orders WHERE id=? AND user_id=?", (oid, uid)).fetchone()
+        try:
+            o = db.execute("SELECT provider_order,status,price_syp,provider_id FROM orders WHERE id=? AND user_id=?", (oid, uid)).fetchone()
+            pvid = o[3] if len(o) > 3 else None
+        except Exception:
+            o = db.execute("SELECT provider_order,status,price_syp FROM orders WHERE id=? AND user_id=?", (oid, uid)).fetchone()
+            pvid = None
         if not o: return jsonify({"message": "الطلب غير موجود"}), 404
-        st = provider_status(o[0])
+        old_reply = (db.execute("SELECT response FROM orders WHERE id=?", (oid,)).fetchone() or [""])[0] or ""
+        st, reply = provider_status(o[0], pvid)
+        if reply and reply != old_reply:
+            try: db.execute("UPDATE orders SET response=? WHERE id=?", (reply[:500], oid))
+            except Exception: pass
+        # التغيّر يُحتسب على الحالة أو الرد (رقم وصل ثم رمز لاحقاً)
+        latest = reply or old_reply
+        if st == o[1] and (not reply or reply == old_reply):
+            return jsonify({"status": st, "changed": False,
+                            "reply": latest, "reply_items": _parse_reply_items(latest)})
         if st == o[1]:
-            return jsonify({"status": st, "changed": False})
+            return jsonify({"status": st, "changed": True,
+                            "reply": latest, "reply_items": _parse_reply_items(latest)})
         db.execute("UPDATE orders SET status=? WHERE id=?", (st, oid))
         if st == "failed":
             # استرجاع الرصيد مرة واحدة عند أول تحوّل للفشل
@@ -1002,12 +1212,45 @@ def order_refresh(oid):
             try: db.execute("INSERT INTO transactions(user_id,type,amount,note) VALUES(?, 'in', ?, ?)", (uid, int(o[2] or 0), f"استرجاع رصيد طلب فاشل #{oid}"))
             except Exception: pass
             notify(uid, "❌ فشل الطلب", f"تم استرجاع {int(o[2] or 0):,} ل.س إلى رصيدك", "error")
-    return jsonify({"status": st, "changed": True})
+    return jsonify({"status": st, "changed": True,
+                    "reply": latest, "reply_items": _parse_reply_items(latest)})
 
 def _order_source(provider_order):
     """api إذا نُفّذ عبر مزوّد حقيقي (له رد يُعرض)، وإلا shop."""
     po = str(provider_order or "")
     return "api" if (po and not po.startswith("LOCAL-")) else "shop"
+
+
+# رسائل داخلية لا تُعرض للمستخدم كـ"رد مزوّد" (ضجيج تقني)
+_TECHNICAL_REPLY_MARKERS = ("تم التنفيذ محلياً", "provider-http-", "provider-error")
+
+
+def _parse_reply_items(reply):
+    """يحوّل نص رد المزوّد لعناصر منظمة للعرض الجميل:
+    [{text, kind}] حيث kind: phone (رقم) / code (رمز) / text (نص).
+    يتجاهل الرسائل التقنية الداخلية ويرجع [] عند غياب رد حقيقي."""
+    import re as _re
+    text = (reply or "").strip()
+    if not text:
+        return []
+    if any(m in text for m in _TECHNICAL_REPLY_MARKERS):
+        return []
+    items = []
+    for part in [p.strip() for p in text.split("|")]:
+        if not part:
+            continue
+        digits = _re.sub(r"\D", "", part)
+        compact = part.replace(" ", "")
+        if "+" in part and len(digits) >= 7:
+            kind = "phone"
+        elif digits and compact == digits and 3 <= len(digits) <= 10 and len(part) <= 14:
+            kind = "code"
+        elif 4 <= len(compact) <= 24 and _re.fullmatch(r"[A-Za-z0-9\-_]+", compact) and any(ch.isdigit() for ch in compact):
+            kind = "code"
+        else:
+            kind = "text"
+        items.append({"text": part, "kind": kind})
+    return items
 
 @app.get("/api/orders/<int:oid>/detail")
 @require_auth
@@ -1020,6 +1263,7 @@ def order_detail(oid):
     status = "accepted" if raw == "completed" else ("rejected" if raw == "failed" else "pending")
     porder = o[8] or ""
     via_provider = _order_source(porder) == "api"
+    reply_items = _parse_reply_items(o[9])
     return jsonify({"id": o[0],
                     "product_name": o[1], "product": o[1],
                     "category_name": o[2], "category": o[2],
@@ -1031,6 +1275,8 @@ def order_detail(oid):
                     "ext_order_id": porder if via_provider else "",
                     "provider_order": porder,
                     "api_response": o[9] or "",
+                    "reply_items": reply_items,
+                    "has_reply": bool(reply_items),
                     "response_time_text": ""})
 
 @app.get("/api/user/activity")
@@ -1127,12 +1373,13 @@ def v1_order():
         if not s: return jsonify({"message": "sku غير موجود"}), 404
         cost = float(s[3]) * qty; bal = balance_of(uid)
         if bal < int(cost * rate()): return jsonify({"message": "رصيد غير كافٍ"}), 402
-        _ptok, _purl, _ppid = sku_provider(s[0])
-        ok, porder, resp = provider_buy(s, player, qty, _ptok, _purl, _ppid)
-        _vst = "completed" if ok else ("pending" if _ptok else "failed")
+        _ptok, _purl, _ppid, _pvid, _popath, _pspath, _linked = sku_provider(s[0])
+        if _linked and not (_ptok or "").strip():
+            return jsonify({"message": "المنتج مربوط بمزوّد لكن التوكن فارغ — أصلح بيانات المزوّد أولاً"}), 400
+        ok, _vst, porder, resp = provider_buy(s, player, qty, _ptok, _purl, _ppid, _popath)
         db.execute("UPDATE balances SET balance=balance-? WHERE user_id=?", (int(cost * rate()), uid))
         _vcost = float(s[4] if len(s) > 4 and s[4] else cost / max(qty, 1)) * qty
-        oid = _insert_order(db, uid, "API", s[2], cost, int(cost * rate()), player, qty, _vst, porder, resp, b.get("order_uuid") or "", _vcost)
+        oid = _insert_order(db, uid, "API", s[2], cost, int(cost * rate()), player, qty, _vst, porder, resp, b.get("order_uuid") or "", _vcost, _pvid)
     return jsonify({"order_id": oid, "status": _vst, "provider_order": porder})
 
 # ================= ADMIN =================
@@ -1843,17 +2090,22 @@ def adm_dm():
 EXTRA_SCHEMA = """
 CREATE TABLE IF NOT EXISTS link_codes(code TEXT PRIMARY KEY, web_user_id INTEGER, expires_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS push_subscriptions(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, endpoint TEXT UNIQUE, p256dh TEXT, auth TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, token TEXT DEFAULT '', url TEXT DEFAULT '');
+CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, token TEXT DEFAULT '', url TEXT DEFAULT '', order_path TEXT DEFAULT '', status_path TEXT DEFAULT '', catalog_path TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS category_links(category_id INTEGER PRIMARY KEY, provider_id INTEGER, provider_product TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS import_batches(id TEXT PRIMARY KEY, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, items INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS import_items(batch_id TEXT, kind TEXT, ref_id INTEGER);
 CREATE TABLE IF NOT EXISTS bot_admins(user_id INTEGER PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS auth_tokens(token TEXT PRIMARY KEY, web_id INTEGER, is_admin INTEGER DEFAULT 0, is_owner INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS snapshots(id TEXT PRIMARY KEY, reason TEXT DEFAULT '', payload TEXT DEFAULT '', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS site_files(name TEXT PRIMARY KEY, data TEXT DEFAULT '', mime TEXT DEFAULT 'image/png', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 """
 def ensure_extra():
     with _init_db_conn() as db:
         _run_idempotent(db, [s for s in EXTRA_SCHEMA.split(";") if s.strip()])
+        # ترحيلات الجداول الإضافية (للقواعد القديمة — الجداول هنا موجودة حتماً)
+        _run_idempotent(db, ["ALTER TABLE providers ADD COLUMN order_path TEXT DEFAULT ''",
+                    "ALTER TABLE providers ADD COLUMN status_path TEXT DEFAULT ''",
+                    "ALTER TABLE providers ADD COLUMN catalog_path TEXT DEFAULT ''"])
         # الفهارس هنا بعد اكتمال كل الجداول (بما فيها auth_tokens وcategory_links).
         _run_idempotent(db, INDEXES)
 try:
@@ -2148,13 +2400,14 @@ def _client_place(pid):
         cost = float(s[3] or 0) * qty
         if balance_of(uid) < int(cost * rate()): return jsonify({"status": "error", "code": 100, "message": "رصيد غير كافٍ"}), 400
         p = db.execute("SELECT name FROM products WHERE id=?", (s[1],)).fetchone()
-        _ptok, _purl, _ppid = sku_provider(s[0])
-        ok, porder, resp = provider_buy(s, player, qty, _ptok, _purl, _ppid)
-        _cst = "completed" if ok else ("pending" if _ptok else "failed")
+        _ptok, _purl, _ppid, _pvid, _popath, _pspath, _linked = sku_provider(s[0])
+        if _linked and not (_ptok or "").strip():
+            return jsonify({"status": "error", "code": 121, "message": "المنتج مربوط بمزوّد لكن التوكن فارغ"}), 400
+        ok, _cst, porder, resp = provider_buy(s, player, qty, _ptok, _purl, _ppid, _popath)
         if s[4] is not None: db.execute("UPDATE skus SET stock_qty=stock_qty-? WHERE id=?", (qty, s[0]))
         db.execute("UPDATE balances SET balance=balance-? WHERE user_id=?", (int(cost * rate()), uid))
         _ccost = float(s[8] if len(s) > 8 and s[8] else cost / max(qty, 1)) * qty
-        oid = _insert_order(db, uid, p[0] if p else "", s[2], cost, int(cost * rate()), player, qty, _cst, porder, resp, ouuid or f"c-{uid}-{int(time.time())}", _ccost)
+        oid = _insert_order(db, uid, p[0] if p else "", s[2], cost, int(cost * rate()), player, qty, _cst, porder, resp, ouuid or f"c-{uid}-{int(time.time())}", _ccost, _pvid)
     return jsonify({"status": "OK", "data": {"order_id": f"ID_{oid}", "status": "processing" if ok else ("pending" if _cst == "pending" else "failed"), "price": cost, "data": {"playerId": player}, "replay_api": []}})
 
 @app.route("/client/api/newOrder/<string:pid>", methods=["GET", "POST"])
@@ -2220,9 +2473,25 @@ def adm_shop_exec(oid):
     with get_db() as db:
         o = db.execute("SELECT player,qty,sku FROM orders WHERE id=?", (oid,)).fetchone()
         if not o: return jsonify({"message": "غير موجود"}), 404
-        ok, porder, resp = provider_buy((0, 0, o[2], 0), o[0], o[1] or 1)
-        db.execute("UPDATE orders SET status=?,provider_order=?,response=? WHERE id=?", ("completed" if ok else "failed", porder, (resp or "")[:300], oid))
-    return jsonify({"message": "تم التنفيذ ✅" if ok else "فشل التنفيذ", "provider_order": porder})
+        # استخدم المزوّد المختار في النافذة — وإلا كان التنفيذ محلياً دائماً
+        pid = b.get("provider_id")
+        ref = (b.get("api_product_id") or "").strip()
+        cost = float(b.get("cost_usd") or 0)
+        tok, url, opath = PROVIDER_TOKEN, PROVIDER_URL, ""
+        if pid:
+            prov = _get_provider(pid)
+            if not prov: return jsonify({"message": "المزوّد غير موجود"}), 404
+            tok, url, opath = prov["token"], prov["url"], prov.get("order_path", "")
+        if not (tok or "").strip():
+            return jsonify({"message": "المزوّد بلا توكن — أضف التوكن أولاً"}), 400
+        ok, st, porder, resp = provider_buy((0, 0, o[2], 0), o[0], o[1] or 1, tok, url, ref or None, opath)
+        st = st if st in ("completed", "pending", "failed") else ("completed" if ok else "failed")
+        try:
+            db.execute("UPDATE orders SET status=?,provider_order=?,response=?,cost_usd=?,provider_id=? WHERE id=?",
+                       (st, porder, (resp or "")[:300], cost, pid, oid))
+        except Exception:
+            db.execute("UPDATE orders SET status=?,provider_order=?,response=? WHERE id=?", (st, porder, (resp or "")[:300], oid))
+    return jsonify({"message": "تم التنفيذ ✅" if ok else "فشل التنفيذ", "status": st, "provider_order": porder})
 
 # --- أسماء بديلة لمسارات الأصلي ---
 @app.post("/api/admin/users/<int:wid>/api/enable")
@@ -2331,17 +2600,64 @@ def adm_cat_del(cid): return adm_sku_del(cid)
 def adm_all_pricing():
     with get_db() as db:
         rows = db.execute("SELECT s.id,s.name,s.price,s.cost,p.name FROM skus s LEFT JOIN products p ON p.id=s.product_id ORDER BY s.id").fetchall()
-    return jsonify([{"id": r[0], "name": r[1], "price": r[2], "cost": r[3], "product": r[4] or ""} for r in rows])
+        links = {}
+        try:
+            for lr in db.execute("SELECT l.category_id,p.name,l.provider_product,p.token FROM category_links l JOIN providers p ON p.id=l.provider_id").fetchall():
+                links[lr[0]] = {"provider_name": lr[1], "api_product_id": lr[2] or "", "has_token": bool((lr[3] or "").strip())}
+        except Exception:
+            pass
+    out = []
+    for r in rows:
+        price = float(r[2] or 0)
+        cost = float(r[3] or 0)
+        margin = round((price - cost) / cost * 100, 1) if cost > 0 else None
+        lk = links.get(r[0])
+        out.append({"id": r[0], "name": r[1],
+                    "price": price, "price_usd": price,
+                    "cost": cost, "cost_usd": cost,
+                    "margin_percent": margin,
+                    "product": r[4] or "", "product_name": r[4] or "",
+                    "linked": bool(lk), "provider_name": (lk or {}).get("provider_name", ""),
+                    "api_product_id": (lk or {}).get("api_product_id", ""),
+                    "token_ok": bool((lk or {}).get("has_token")) if lk else False})
+    return jsonify(out)
 
 @app.post("/api/admin/categories/apply-margin")
 @require_admin
 def adm_margin():
     b = request.get_json(force=True, silent=True) or {}
-    m = float(b.get("margin_percent") or 0)
+    try:
+        m = float(b.get("margin_percent") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"message": "نسبة الهامش غير صالحة"}), 400
+    if m < 0:
+        return jsonify({"message": "نسبة الهامش غير صالحة"}), 400
+    ids = b.get("category_ids") or []
+    try:
+        ids = [int(x) for x in ids]
+    except (TypeError, ValueError):
+        return jsonify({"message": "الفئات المحددة غير صالحة"}), 400
     pid = b.get("product_id")
     with get_db() as db:
-        if pid: db.execute("UPDATE skus SET price=cost*(1+?/100.0) WHERE product_id=?", (m, pid))
-        else: db.execute("UPDATE skus SET price=cost*(1+?/100.0)", (m,))
+        if ids:
+            # الواجهة ترسل الفئات المحددة — حدّثها فقط، وتجاوز ما بلا تكلفة
+            ph = ",".join(["?"] * len(ids))
+            rows = db.execute(f"SELECT id,cost FROM skus WHERE id IN ({ph})", tuple(ids)).fetchall()
+            n, skipped = 0, 0
+            for sid, cost in rows:
+                if not cost or float(cost) <= 0:
+                    skipped += 1
+                    continue
+                db.execute("UPDATE skus SET price=cost*(1+?/100.0) WHERE id=?", (m, sid))
+                n += 1
+            msg = f"تم تطبيق هامش {m}% على {n} فئة ✅"
+            if skipped:
+                msg += f" (تُجاوز {skipped} بلا تكلفة مسجلة)"
+            return jsonify({"message": msg, "updated": n, "skipped": skipped})
+        if pid:
+            db.execute("UPDATE skus SET price=cost*(1+?/100.0) WHERE product_id=? AND cost>0", (m, pid))
+        else:
+            db.execute("UPDATE skus SET price=cost*(1+?/100.0) WHERE cost>0", (m,))
     return jsonify({"message": f"تم تطبيق هامش {m}% ✅"})
 
 @app.post("/api/admin/categories/<int:cid>/link")
@@ -2349,10 +2665,21 @@ def adm_margin():
 def adm_link(cid):
     b = request.get_json(force=True, silent=True) or {}
     if not b.get("provider_id"): return jsonify({"message": "اختر المزوّد"}), 400
+    # الواجهة ترسل api_product_id — نقبله مع كل الأسماء البديلة ولا نحفظ ربطاً فارغاً أبداً
+    ref = (b.get("provider_product") or b.get("api_product_id") or b.get("product_id") or "").strip()
+    if not ref: return jsonify({"message": "أدخل آيدي منتج المزوّد"}), 400
+    try:
+        pid = int(b.get("provider_id"))
+    except (TypeError, ValueError):
+        return jsonify({"message": "المزوّد غير صالح"}), 400
     with get_db() as db:
-        if USE_PG: db.execute("INSERT INTO category_links(category_id,provider_id,provider_product) VALUES(?,?,?) ON CONFLICT(category_id) DO UPDATE SET provider_id=excluded.provider_id,provider_product=excluded.provider_product", (cid, b.get("provider_id"), b.get("provider_product", "")))
-        else: db.execute("INSERT OR REPLACE INTO category_links(category_id,provider_id,provider_product) VALUES(?,?,?)", (cid, b.get("provider_id"), b.get("provider_product", "")))
-    return jsonify({"message": "تم الربط ✅"})
+        if not db.execute("SELECT 1 FROM skus WHERE id=?", (cid,)).fetchone():
+            return jsonify({"message": "الفئة غير موجودة"}), 404
+        if not db.execute("SELECT 1 FROM providers WHERE id=?", (pid,)).fetchone():
+            return jsonify({"message": "المزوّد غير موجود"}), 404
+        if USE_PG: db.execute("INSERT INTO category_links(category_id,provider_id,provider_product) VALUES(?,?,?) ON CONFLICT(category_id) DO UPDATE SET provider_id=excluded.provider_id,provider_product=excluded.provider_product", (cid, pid, ref))
+        else: db.execute("INSERT OR REPLACE INTO category_links(category_id,provider_id,provider_product) VALUES(?,?,?)", (cid, pid, ref))
+    return jsonify({"message": f"تم الربط ✅ ({ref})"})
 
 @app.delete("/api/admin/categories/<int:cid>/link")
 @require_admin
@@ -2365,21 +2692,42 @@ def adm_unlink(cid):
 @require_admin
 def adm_provs():
     with get_db() as db:
-        rows = db.execute("SELECT id,name,url,token FROM providers").fetchall()
+        try:
+            rows = db.execute("SELECT id,name,url,token,order_path,status_path,catalog_path FROM providers").fetchall()
+            full = True
+        except Exception:
+            rows = db.execute("SELECT id,name,url,token FROM providers").fetchall()
+            full = False
         out = []
         for r in rows:
             lc = db.execute("SELECT COUNT(*) FROM category_links WHERE provider_id=?", (r[0],)).fetchone()[0]
             out.append({"id": r[0], "name": r[1], "url": r[2] or "", "api_url": r[2] or "",
-                        "has_token": bool(r[3]), "linked_products": lc})
+                        "has_token": bool(r[3]), "linked_products": lc,
+                        "order_path": (r[4] if full else "") or "",
+                        "status_path": (r[5] if full else "") or "",
+                        "catalog_path": (r[6] if full else "") or ""})
     return jsonify(out)
 
 @app.post("/api/admin/providers")
 @require_admin
 def adm_provs_add():
     b = request.get_json(force=True, silent=True) or {}
+    # الواجهة ترسل api_token/api_url — نقبلهما مع الأسماء البديلة، ونرفض الحفظ الفارغ بصمت
+    name = (b.get("name") or "").strip() or "مزوّد"
+    tok = (b.get("token") or b.get("api_token") or "").strip()
+    url = (b.get("url") or b.get("api_url") or "").strip().rstrip("/")
+    if not tok or not url:
+        return jsonify({"message": "أدخل اسم المزوّد والتوكن والرابط كاملةً"}), 400
+    opath = (b.get("order_path") or "").strip()
+    spath = (b.get("status_path") or "").strip()
+    cpath = (b.get("catalog_path") or "").strip()
     with get_db() as db:
-        db.execute("INSERT INTO providers(name,token,url) VALUES(?,?,?)", (b.get("name", "مزوّد"), b.get("token", ""), b.get("url", "")))
-    return jsonify({"message": "تمت الإضافة ✅"})
+        try:
+            db.execute("INSERT INTO providers(name,token,url,order_path,status_path,catalog_path) VALUES(?,?,?,?,?,?)",
+                       (name, tok, url, opath, spath, cpath))
+        except Exception:
+            db.execute("INSERT INTO providers(name,token,url) VALUES(?,?,?)", (name, tok, url))
+    return jsonify({"message": "تمت إضافة المزوّد ✅"})
 
 @app.delete("/api/admin/providers/<int:pid>")
 @require_admin
@@ -2391,20 +2739,118 @@ def adm_provs_del(pid):
 def _provider_products(prov):
     try:
         import requests as _rq
-        r = _rq.post((prov[2] or "").rstrip("/") + "/products", json={"token": prov[1]}, timeout=10)
-        if r.ok:
-            d = r.json()
-            return d if isinstance(d, list) else d.get("products", [])
+        if isinstance(prov, dict):
+            tok, url = prov.get("token", ""), prov.get("url", "")
+            cpath = (prov.get("catalog_path", "") or "").strip()
+        else:
+            tok = prov[1] if len(prov) > 1 else ""
+            url = prov[2] if len(prov) > 2 else ""
+            cpath = prov[6] if len(prov) > 6 else ""
+            cpath = (cpath or "").strip()
+        tok = (tok or "").strip()
+        if not tok:
+            return []
+        base = (url or "").strip().rstrip("/") or "https://api.shams4store.com"
+        if cpath:
+            # مسار مخصص: POST القديم
+            r = _rq.post(_pjoin(base, cpath, "/products"), json={"token": tok}, timeout=10)
+            if r.ok:
+                d = r.json()
+                return d if isinstance(d, list) else d.get("products", [])
+            return []
+        # الافتراضي: نمط client/api (شمس)
+        r = _rq.get(base + "/client/api/products", headers={"api-token": tok}, timeout=12)
+        if not r.ok:
+            return []
+        d = r.json()
+        return d if isinstance(d, list) else d.get("products", [])
     except Exception: pass
     return []
 
 @app.get("/api/admin/providers/<int:pid>/products")
 @require_admin
 def adm_prov_prods(pid):
-    with get_db() as db:
-        p = db.execute("SELECT id,token,url FROM providers WHERE id=?", (pid,)).fetchone()
+    p = _get_provider(pid)
     if not p: return jsonify({"message": "غير موجود"}), 404
     return jsonify([{"id": x.get("id", ""), "name": x.get("name", ""), "price": x.get("price", 0)} for x in _provider_products(p)])
+
+@app.post("/api/admin/providers/<int:pid>/test")
+@require_admin
+def adm_prov_test(pid):
+    """فحص اتصال المزوّد — قراءة فقط وآمن تماماً (لا يُنشئ أي طلب حقيقي).
+    يجرّب مسار الكتالوج ومسار الحالة ويكشف إن كان المسار نفسه خطأ (404 بصفحة HTML)
+    أم أن المسار صحيح والمشكلة في التوكن/البيانات (رد JSON)."""
+    import requests as _rq
+    prov = _get_provider(pid)
+    if not prov:
+        return jsonify({"message": "المزوّد غير موجود"}), 404
+    tok = (prov.get("token") or "").strip()
+    if not tok:
+        return jsonify({"message": "المزوّد بلا توكن — أضف التوكن أولاً"}), 400
+    base = (prov.get("url") or "").strip().rstrip("/")
+    if not base:
+        return jsonify({"message": "المزوّد بلا رابط — أضف الرابط أولاً"}), 400
+    checks = []
+
+    def _probe(label, method, url, **kw):
+        try:
+            r = _rq.request(method, url, timeout=8, **kw)
+            try:
+                d = r.json()
+                is_json = True
+            except Exception:
+                d, is_json = None, False
+            if r.status_code == 404 and not is_json:
+                verdict = f"❌ المسار خطأ (لا يوجد شيء على هذا الرابط) — صحّح مسار {label} في إعدادات المزوّد"
+                ok = False
+            elif is_json:
+                verdict = f"✅ المسار صحيح ويرد JSON (رمز {r.status_code})"
+                ok = True
+            else:
+                verdict = f"⚠️ يرد (رمز {r.status_code}) لكن ليس JSON — راجع شكل الرد"
+                ok = r.ok
+            return {"label": label, "url": url, "http": r.status_code,
+                    "json": is_json, "ok": ok, "verdict": verdict,
+                    "sample": (str(d)[:200] if is_json else (r.text or "")[:200])}
+        except Exception as e:
+            return {"label": label, "url": url, "http": None,
+                    "json": False, "ok": False,
+                    "verdict": f"❌ تعذّر الوصول: {e} — تحقق من الرابط والإنترنت",
+                    "sample": ""}
+
+    cpath = (prov.get("catalog_path", "") or "").strip()
+    spath = (prov.get("status_path", "") or "").strip()
+    opath = (prov.get("order_path", "") or "").strip()
+    if cpath:
+        checks.append(_probe("الكتالوج (مخصص)", "POST", _pjoin(base, cpath, "/products"),
+                             json={"token": tok}))
+    else:
+        checks.append(_probe("الكتالوج", "GET", base + "/client/api/products",
+                             headers={"api-token": tok}))
+    if spath:
+        checks.append(_probe("الحالة (مخصص)", "GET", _pjoin(base, spath, "/api/order-status"),
+                             params={"token": tok, "order_id": "TEST-PROBE-000"}))
+    else:
+        checks.append(_probe("الحالة", "GET", base + "/client/api/check",
+                             headers={"api-token": tok},
+                             params={"orders": '["TEST-PROBE-000"]', "uuid": "1"}))
+    n_products = 0
+    try:
+        items = _provider_products(prov)
+        n_products = len(items)
+    except Exception:
+        pass
+    all_ok = all(c["ok"] for c in checks)
+    return jsonify({
+        "message": "الاتصال سليم ✅ — المسارات تعمل" if all_ok else "يوجد خلل — راجع تفاصيل الفحص بالأسفل",
+        "ok": all_ok,
+        "catalog_url": _pjoin(base, cpath, "/products") if cpath else base + "/client/api/products",
+        "order_url": _pjoin(base, opath, "/api/order") if opath else base + "/client/api/newOrder/{id}/params",
+        "status_url": _pjoin(base, spath, "/api/order-status") if spath else base + "/client/api/check",
+        "products_found": n_products,
+        "checks": checks,
+    })
+
 
 @app.get("/api/admin/categories/<int:cid>/link")
 @require_admin
@@ -2419,8 +2865,7 @@ def adm_link_get(cid):
 def adm_prov_import(pid):
     b = request.get_json(force=True, silent=True) or {}
     margin = float(b.get("margin_percent") or b.get("margin") or 20)
-    with get_db() as db:
-        p = db.execute("SELECT id,token,url FROM providers WHERE id=?", (pid,)).fetchone()
+    p = _get_provider(pid)
     if not p: return jsonify({"message": "غير موجود"}), 404
     items = _provider_products(p)
     if not items: return jsonify({"message": "تعذّر جلب كتالوج المزوّد"}), 502
@@ -2715,6 +3160,26 @@ def adm_devlogo(): return _save_setting_file("dev_logo")
 @app.post("/api/admin/settings/app-icon")
 @require_admin
 def adm_appicon(): return _save_setting_file("app_icon")
+
+
+def _clear_setting(key):
+    set_setting(key, "")
+    return jsonify({"message": "تمت الإزالة ✅"})
+
+
+@app.delete("/api/admin/settings/logo")
+@require_admin
+def adm_logo_del(): return _clear_setting("logo_image")
+
+
+@app.delete("/api/admin/settings/dev-logo")
+@require_admin
+def adm_devlogo_del(): return _clear_setting("dev_logo")
+
+
+@app.delete("/api/admin/settings/app-icon")
+@require_admin
+def adm_appicon_del(): return _clear_setting("app_icon")
 
 @app.post("/api/admin/settings/banner-image")
 @require_admin
@@ -3053,7 +3518,8 @@ SNAP_TABLES = ("settings", "sections", "subsections", "products", "skus",
                "web_users", "balances", "user_tier", "tiers",
                "deposit_manual", "deposit_auto", "deposit_requests", "orders",
                "transactions", "notifications", "banners", "web_admins",
-               "bot_admins", "providers", "category_links", "referrals")
+               "bot_admins", "providers", "category_links", "referrals",
+               "site_files")
 
 def _table_cols(db, table):
     try:
@@ -3118,7 +3584,23 @@ def _auto_snapshot(reason="auto"):
 
 # ---------- static ----------
 @app.get("/uploads/<path:f>")
-def upl(f): return send_from_directory(UPLOAD_DIR, f)
+def upl(f):
+    name = secure_filename((f or "").split("/")[-1])
+    if not name:
+        return jsonify({"message": "غير موجود"}), 404
+    p = os.path.join(UPLOAD_DIR, name)
+    if os.path.isfile(p):
+        return send_from_directory(UPLOAD_DIR, name)
+    # الملف المحلي ضاع (طبيعي على Vercel) — قدّم النسخة الدائمة من قاعدة البيانات
+    data, mime = _get_site_file(name)
+    if data:
+        # أعد كتابته محلياً أيضاً لتسريع الطلبات التالية على نفس النسخة
+        try:
+            with open(p, "wb") as fh: fh.write(data)
+        except Exception: pass
+        return app.response_class(data, mimetype=mime or "image/png",
+                                  headers={"Cache-Control": "public, max-age=86400"})
+    return jsonify({"message": "الصورة غير موجودة — أعد رفعها من لوحة التحكم"}), 404
 
 @app.get("/brand/<int:pid>.svg")
 def brand_img(pid):
@@ -3149,7 +3631,7 @@ def root(): return send_from_directory(app.static_folder, "store.html")
 def health():
     surl = os.environ.get("SUPABASE_URL", "").strip()
     skey = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-    info = {"ok": True, "pg": USE_PG, "build": "20261008-ratelimit-json",
+    info = {"ok": True, "pg": USE_PG, "build": "20261009-logo-persist",
             "time": datetime.now().isoformat(),
             "storage": "persistent-postgres" if USE_PG else "ephemeral (set DATABASE_URL or data will be lost)",
             "uploads": "supabase" if (surl and skey) else "ephemeral-tmp (set SUPABASE_* or uploaded images may vanish)"}

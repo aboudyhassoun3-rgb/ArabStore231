@@ -944,7 +944,7 @@ function renderPricingTable(){
       <td><input type="checkbox" class="pricing-row-check" data-id="${c.id}" onchange="updatePricingSelectedCount()"></td>
       <td>${c.product_name}</td>
       <td>${c.name}</td>
-      <td>${c.linked ? c.provider_name : '<span class="text-muted">غير مربوطة</span>'}</td>
+      <td>${c.linked ? (c.token_ok ? c.provider_name : `<span style="color:var(--danger);">⚠️ ${c.provider_name} — التوكن فارغ!</span>`) : '<span class="text-muted">غير مربوطة</span>'}</td>
       <td>${c.cost_usd != null ? "$"+Number(c.cost_usd).toFixed(4) : "—"}</td>
       <td>${c.margin_percent != null ? c.margin_percent+"%" : '<span class="text-muted">يدوي</span>'}</td>
       <td>$${Number(c.price_usd).toFixed(4)}</td>
@@ -985,14 +985,27 @@ async function applyMarginToSelected(){
 async function loadProviders(){
   const providers = await adminFetch("/admin/providers");
   document.getElementById("providersTableBody").innerHTML = providers.map(p=>`
-    <tr><td>${p.name}</td><td style="font-family:'Orbitron',monospace; font-size:10px;">${p.api_url}</td><td>${p.linked_products}</td>
+    <tr><td>${p.name}${p.has_token ? "" : ' <span style="color:var(--danger);" title="هذا المزوّد بلا توكن — الطلبات المرتبطة به لن تذهب للـ API">⚠️ بلا توكن</span>'}</td><td style="font-family:'Orbitron',monospace; font-size:10px;">${p.api_url}</td><td>${p.linked_products}</td>
     <td><input type="number" id="importMargin_${p.id}" placeholder="10" min="0" step="0.5" style="width:70px; padding:7px; border-radius:8px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); font-size:11px;"></td>
     <td style="display:flex; gap:6px; flex-wrap:wrap;">
+      <button class="btn-sm" onclick="testProvider(${p.id}, this)"><i class="fa-solid fa-stethoscope"></i> فحص الاتصال</button>
       <button class="btn-sm primary" onclick="importProviderCatalog(${p.id}, '${p.name.replace(/'/g,"")}')"><i class="fa-solid fa-cloud-arrow-down"></i> استيراد الكل</button>
       <button class="btn-sm" onclick="exportProviderProducts(${p.id}, '${p.name.replace(/'/g,"")}')"><i class="fa-solid fa-file-arrow-down"></i> تحميل قائمة المنتجات</button>
       <button class="btn-sm danger" onclick="deleteProvider(${p.id})">حذف</button>
     </td></tr>`).join("")
     || `<tr><td colspan="5" class="text-muted" style="text-align:center; padding:16px;">لا يوجد مزوّدون بعد</td></tr>`;
+}
+
+async function testProvider(pid, btn){
+  const orig = btn ? btn.innerHTML : "";
+  if(btn){ btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> جاري الفحص...'; }
+  try{
+    const r = await adminFetch(`/admin/providers/${pid}/test`, { method:"POST" });
+    const lines = (r.checks || []).map(c=>`• ${c.label}: ${c.verdict}\n  ${c.url}`).join("\n");
+    alert(`${r.message}\n\n${lines}\n\nالمنتجات المرصودة: ${r.products_found ?? 0}\nرابط الطلب: ${r.order_url}`);
+    loadProviders();
+  }catch(err){ toast(err.message, "error"); }
+  finally{ if(btn){ btn.disabled = false; btn.innerHTML = orig; } }
 }
 
 async function exportProviderProducts(providerId, providerName){
@@ -1118,13 +1131,16 @@ async function importProviderFile(){
 }
 async function addProvider(){
   const name = document.getElementById("providerName").value.trim();
-  const api_token = document.getElementById("providerToken").value.trim();
-  const api_url = document.getElementById("providerUrl").value.trim();
-  if(!name || !api_token || !api_url){ toast("عبّي كل الحقول", "error"); return; }
+  const token = document.getElementById("providerToken").value.trim();
+  const url = document.getElementById("providerUrl").value.trim();
+  const order_path = document.getElementById("providerOrderPath")?.value.trim() || "";
+  const status_path = document.getElementById("providerStatusPath")?.value.trim() || "";
+  const catalog_path = document.getElementById("providerCatalogPath")?.value.trim() || "";
+  if(!name || !token || !url){ toast("عبّي الاسم والتوكن والرابط", "error"); return; }
   try{
-    await adminFetch("/admin/providers", { method:"POST", body: JSON.stringify({ name, api_token, api_url }) });
+    await adminFetch("/admin/providers", { method:"POST", body: JSON.stringify({ name, token, url, order_path, status_path, catalog_path }) });
     toast("تمت إضافة المزوّد ✅");
-    ["providerName","providerToken","providerUrl"].forEach(id=> document.getElementById(id).value = "");
+    ["providerName","providerToken","providerUrl","providerOrderPath","providerStatusPath","providerCatalogPath"].forEach(id=>{ const el = document.getElementById(id); if(el) el.value = ""; });
     loadProviders();
   }catch(err){ toast(err.message, "error"); }
 }
@@ -1524,11 +1540,31 @@ async function openLinkModal(categoryId, categoryName){
   document.getElementById("linkApiProductId").value = "";
   document.getElementById("linkProviderProducts").innerHTML = "";
   document.getElementById("linkCurrentStatus").innerHTML = "";
+  document.getElementById("linkTokenWarn")?.remove();
   document.getElementById("linkModal").style.display = "flex";
 
   const providers = await adminFetch("/admin/providers").catch(()=>[]);
   const sel = document.getElementById("linkProviderSel");
-  sel.innerHTML = `<option value="">— اختر المزوّد —</option>` + providers.map(p=>`<option value="${p.id}">${p.name}</option>`).join("");
+  sel.innerHTML = `<option value="">— اختر المزوّد —</option>` + providers.map(p=>`<option value="${p.id}">${p.name}${p.has_token ? "" : " ⚠️ (بلا توكن)"}</option>`).join("");
+  sel._providers = providers;
+  if(!sel._warnWired){
+    sel._warnWired = true;
+    sel.addEventListener("change", ()=>{
+    const list = sel._providers || providers;
+    const chosen = list.find(x=>String(x.id)===String(sel.value));
+    let warn = document.getElementById("linkTokenWarn");
+    if(chosen && !chosen.has_token){
+      if(!warn){
+        warn = document.createElement("div");
+        warn.id = "linkTokenWarn";
+        sel.closest(".field").appendChild(warn);
+      }
+      warn.innerHTML = `<div class="info-banner" style="font-size:11px; border-color:var(--danger); margin-top:8px;"><i class="fa-solid fa-triangle-exclamation" style="color:var(--danger);"></i><div>هذا المزوّد بلا توكن — احذفه وأعده بالتوكن الصحيح وإلا لن تذهب الطلبات للـ API</div></div>`;
+    }else if(warn){
+      warn.remove();
+    }
+    });
+  }
 
   try{
     const status = await adminFetch(`/admin/categories/${categoryId}/link`);
@@ -1563,7 +1599,7 @@ async function confirmLink(){
   const btn = document.getElementById("linkConfirmBtn");
   btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
   try{
-    const r = await adminFetch(`/admin/categories/${linkCategoryId}/link`, { method:"POST", body: JSON.stringify({ provider_id: Number(provider_id), api_product_id }) });
+    const r = await adminFetch(`/admin/categories/${linkCategoryId}/link`, { method:"POST", body: JSON.stringify({ provider_id: Number(provider_id), provider_product: api_product_id }) });
     toast("✅ " + r.message); closeLinkModal(); loadCategories();
   }catch(err){ toast(err.message, "error"); }
   btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-link"></i> حفظ الربط';
