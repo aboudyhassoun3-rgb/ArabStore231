@@ -509,9 +509,20 @@
           <button class="btn btn-primary" onclick="importCatalogCsv()"><i class="fa-solid fa-cloud-arrow-up"></i> استيراد المنتجات المصنّفة</button>
           <button class="btn-sm danger" id="catalogRollbackBtn" style="display:none;" onclick="rollbackCatalogImport()"><i class="fa-solid fa-rotate-left"></i> التراجع عن آخر دفعة</button>
           <button class="btn-sm" onclick="brandAllImages()"><i class="fa-solid fa-wand-magic-sparkles"></i> توليد صور لكل المنتجات</button>
+          <button class="btn-sm primary" id="bulkAiBtn" onclick="bulkAiImages()"><i class="fa-solid fa-robot"></i> توليد عبر API لكل المنتجات (بالخلفية)</button>
           <button class="btn-sm danger" onclick="clearCatalogProducts()"><i class="fa-solid fa-trash"></i> مسح كل المنتجات</button>
         </div>
         <div id="catalogImportResult" class="field-hint mt-10"></div>
+        <div id="bulkAiProgress" style="display:none; margin-top:10px;">
+          <div style="display:flex; align-items:center; justify-content:space-between; font-size:12px; margin-bottom:6px;">
+            <span id="bulkAiLabel">جاري التوليد…</span>
+            <button class="btn-sm danger" onclick="stopBulkAi()">إيقاف</button>
+          </div>
+          <div style="height:10px; border-radius:99px; background:var(--card-soft); border:1px solid var(--border); overflow:hidden;">
+            <div id="bulkAiBar" style="height:100%; width:0%; border-radius:99px; background:linear-gradient(90deg,var(--gold),var(--gold-2)); transition:width .3s;"></div>
+          </div>
+          <div id="bulkAiFails" class="field-hint mt-10"></div>
+        </div>
       </div>
       <div class="panel">
         <div class="panel-head"><h3>إضافة منتج جديد</h3></div>

@@ -351,6 +351,38 @@ def _lux_brand_bar(gid, brand):
             f'font-family="Arial, Helvetica, sans-serif" letter-spacing="3">★ {brand} ★</text>')
 
 
+def _store_badge(gid):
+    """شارة شعار المتجر الذهبية (AS) أعلى-يسار كل صورة — صغيرة ومناسبة وثابتة."""
+    return (f'<g transform="translate(24,22)">'
+            f'<rect width="128" height="46" rx="14" fill="#000000" opacity="0.55" '
+            f'stroke="{STORE_GOLD}" stroke-opacity="0.65" stroke-width="1.5"/>'
+            f'<text x="12" y="33" font-size="26" font-weight="bold" fill="url(#gd{gid})" '
+            f'font-family="Georgia, serif" font-style="italic">AS</text>'
+            f'<text x="52" y="21" font-size="12" font-weight="bold" fill="{STORE_GOLD}" '
+            f'font-family="Arial, Helvetica, sans-serif" letter-spacing="1.5">ARAB</text>'
+            f'<text x="52" y="36" font-size="12" font-weight="bold" fill="#ffffff" '
+            f'font-family="Arial, Helvetica, sans-serif" letter-spacing="1.5">STORE</text>'
+            f'</g>')
+
+
+def detect_brand(name):
+    """يبحث أولاً عن اللعبة/البراند داخل الاسم قبل التوليد.
+    يرجع (brand_en, monogram) أو (None, None) إن لم يُتعرف عليه."""
+    mark = official_mark(name or "")
+    if not mark:
+        return None, None
+    mono, _mbg, _mfg = mark
+    en = to_english(name or "")
+    words = en.split(" ")
+    brand = " ".join(words[:2]) if len(words) > 1 else words[0]
+    # إن كان الاسم يبدأ بكمية (UC/DIAMONDS...) خذ الكلمات التالية
+    generic_first = {"UC", "DIAMONDS", "GOLD", "COINS", "TOP", "UP", "CARD", "CARDS",
+                     "MONTHLY", "WEEKLY", "PASS", "VOUCHER", "VOUCHERS", "TICKET", "TICKETS"}
+    if words and words[0] in generic_first and len(words) > 2:
+        brand = " ".join(words[1:3])
+    return brand, mono
+
+
 def build_product_svg(name, store_name=None):
     """صورة منتج فخمة بهوية المتجر الموحدة: كحلي + توهج أحمر + ذهبي،
     العنوان إنجليزي حصراً، مع الشعار الرسمي للمنتجات المعروفة."""
@@ -384,7 +416,7 @@ def build_product_svg(name, store_name=None):
                   f'<circle cx="300" cy="148" r="58" fill="none" stroke="{STORE_GOLD}" stroke-width="3" stroke-opacity="0.85"/>'
                   f'<text x="300" y="172" text-anchor="middle" font-size="58">{emo}</text>')
     return (f'<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" viewBox="0 0 600 400">'
-            f'{_lux_defs(gid)}{_lux_frame(gid)}{emblem}{title_svg}{_lux_brand_bar(gid, brand)}</svg>')
+            f'{_lux_defs(gid)}{_lux_frame(gid)}{_store_badge(gid)}{emblem}{title_svg}{_lux_brand_bar(gid, brand)}</svg>')
 
 
 def build_section_svg(name, store_name=None):
@@ -419,7 +451,7 @@ def build_section_svg(name, store_name=None):
                   f'<circle cx="300" cy="148" r="58" fill="none" stroke="{STORE_GOLD}" stroke-width="3" stroke-opacity="0.85"/>'
                   f'<text x="300" y="172" text-anchor="middle" font-size="58">{emo}</text>')
     return (f'<svg xmlns="http://www.w3.org/2000/svg" width="600" height="400" viewBox="0 0 600 400">'
-            f'{_lux_defs(gid)}{_lux_frame(gid, "ARAB STORE • CATEGORY")}{emblem}{title_svg}{_lux_brand_bar(gid, brand)}</svg>')
+            f'{_lux_defs(gid)}{_lux_frame(gid, "ARAB STORE • CATEGORY")}{_store_badge(gid)}{emblem}{title_svg}{_lux_brand_bar(gid, brand)}</svg>')
 
 
 # ------------------------------------------------------------------
@@ -427,6 +459,7 @@ def build_section_svg(name, store_name=None):
 # ------------------------------------------------------------------
 STYLE_LOCK = ("luxury dark gaming store artwork, deep navy background #0b0f19, "
               "red neon glow accents #ff1a3c, gold highlights #ffc24b, "
+              "small gold AS store logo badge in the top-left corner, "
               "premium glassmorphism card, soft vignette, cinematic lighting, "
               "ultra clean, centered composition, high contrast, 4k, "
               "bold uppercase English title text only, absolutely no Arabic text, "

@@ -137,6 +137,81 @@ async function brandAllImages(){
     toast(data.message); loadProducts();
   }catch(err){ toast(err.message, "error"); }
 }
+/* التوليد الجماعي عبر API الخارجي — دفعات متتالية (2 بكل طلب) مع شريط تقدم،
+   يعمل بأمان على Vercel مهما كان عدد المنتجات. يتخطى الصور الحقيقية المرفوعة. */
+let bulkAiRunning = false;
+function stopBulkAi(){ bulkAiRunning = false; }
+async function bulkAiImages(){
+  if(bulkAiRunning) return;
+  bulkAiRunning = true;
+  const bar = document.getElementById("bulkAiBar");
+  const wrap = document.getElementById("bulkAiProgress");
+  const label = document.getElementById("bulkAiLabel");
+  const failsBox = document.getElementById("bulkAiFails");
+  const btn = document.getElementById("bulkAiBtn");
+  if(btn) btn.disabled = true;
+  wrap.style.display = "block";
+  failsBox.textContent = "";
+  let doneTotal = 0, failSeen = new Set(), grand = null, retries = 0, deadRounds = 0;
+  const LIMIT = 2;
+  try{
+    while(bulkAiRunning){
+      label.textContent = `جاري التوليد… تم ${doneTotal}${grand ? " / " + grand : ""} ⏳`;
+      let res;
+      try{
+        // offset=0 دائماً: الباكند يعطي أول دفعة من المتبقي (المعالَج يخرج من القائمة)
+        res = await adminFetch("/admin/catalog/brand-images/bulk", {
+          method:"POST", body: JSON.stringify({ limit: LIMIT, offset: 0 })
+        });
+        retries = 0;
+      }catch(err){
+        // محاولة أخيرة واحدة قبل التوقف (انقطاع لحظي / مهلة Vercel)
+        if(++retries > 1) throw err;
+        label.textContent = "انقطاع لحظي — إعادة المحاولة… ⏳";
+        await new Promise(r=>setTimeout(r, 2500));
+        continue;
+      }
+      doneTotal += (res.updated || 0);
+      if(grand === null) grand = doneTotal + (res.total || 0);
+      (res.failed || []).forEach(f=>{
+        const k = "p" + f.id;
+        if(!failSeen.has(k)){
+          failSeen.add(k);
+          failsBox.innerHTML += `<div>⚠️ ${escapeHtml(f.name || ("#" + f.id))}: ${escapeHtml(f.error || "")}</div>`;
+        }
+      });
+      const pct = grand ? Math.min(100, Math.round(doneTotal / grand * 100)) : 100;
+      bar.style.width = pct + "%";
+      label.textContent = `تم ${doneTotal}${grand ? " / " + grand : ""} ✅`;
+      if(res.done) break;
+      if((res.updated || 0) === 0 && (res.failed || []).length > 0){
+        // دفعة فاشلة بالكامل (API متوقف مثلاً) — لا تدور للأبد
+        if(++deadRounds >= 3){
+          label.textContent = "توقف: 3 دفعات فاشلة متتالية — تحقق من API الصور ثم أعد التشغيل";
+          toast("توقف التوليد: فشل متكرر — تحقق من API الصور", "error");
+          break;
+        }
+      }else{
+        deadRounds = 0;
+      }
+      await new Promise(r=>setTimeout(r, 800));
+    }
+    if(!bulkAiRunning){
+      toast("تم إيقاف التوليد الجماعي", "error");
+    }else if(deadRounds < 3){
+      bar.style.width = "100%";
+      label.textContent = `اكتمل التوليد الجماعي ✅ (${doneTotal} منتج، فشل ${failSeen.size})`;
+      toast(`اكتمل التوليد الجماعي ✅ (${doneTotal} منتج)`);
+      loadProducts();
+    }
+  }catch(err){
+    label.textContent = "توقف بخطأ: " + err.message;
+    toast(err.message, "error");
+  }finally{
+    bulkAiRunning = false;
+    if(btn) btn.disabled = false;
+  }
+}
 
 const STATUS_LABEL = { processing:"قيد التنفيذ", completed:"مكتمل", failed:"فشل", pending:"بإنتظار المراجعة" };
 
@@ -1137,6 +1212,7 @@ async function generateAiImage(){
     if(pv && (res.name_en || res.prompt)){
       pv.style.display = "block";
       pv.innerHTML = (res.name_en ? `<div style="margin-bottom:6px;">🏷️ <b dir="auto" style="color:var(--gold);">${escapeHtml(res.name_en)}</b> <span style="color:var(--muted);font-size:11px;">(الاسم بالإنجليزي داخل الصورة — بدون أي حرف عربي)</span></div>` : "")
+        + (res.brand && res.brand.name ? `<div style="margin-bottom:6px; font-size:12px;">🎮 تم التعرف على اللعبة: <b dir="auto">${escapeHtml(res.brand.name)}</b> <span style="color:var(--muted);">— شعارها الرسمي داخل الصورة${res.brand.monogram ? " (" + escapeHtml(res.brand.monogram) + ")" : ""}</span></div>` : "")
         + (res.prompt ? `<div style="font-size:11px;color:var(--muted);line-height:1.8;text-align:left;direction:ltr;">${escapeHtml(res.prompt)}</div>` : "");
     }
   }catch(err){
