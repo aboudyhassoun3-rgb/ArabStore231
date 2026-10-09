@@ -3363,6 +3363,85 @@ def adm_brand_images():
             n += 1
     return jsonify({"message": f"تم توليد صور لـ {n} منتج ✅"})
 
+
+def _needs_api_image(image):
+    """المنتجات المرشحة للتوليد عبر API: بلا صورة، أو صورة مولّدة محلياً فقط.
+    الصور الحقيقية المرفوعة (أسماء uuid عشوائية) لا تُمس أبداً."""
+    img = (image or "").strip()
+    if not img:
+        return True
+    if img.startswith("/brand/"):
+        return True
+    base = img.rsplit("/", 1)[-1]
+    return base.startswith("brand-")
+
+
+@app.post("/api/admin/catalog/brand-images/bulk")
+@require_admin
+def adm_brand_images_bulk():
+    """دفعة واحدة من التوليد الجماعي عبر API الخارجي.
+    {limit, offset, force} — الواجهة تناديه دفعات متتالية (background تدريجي)
+    ليعمل بأمان على Vercel مهما كان عدد المنتجات.
+    force=true يعيد توليد حتى الصور الموجودة (ما عدا المرفوعة يدوياً الحقيقية؟ لا —
+    force يشمل كل ما ليس مرفوعاً يدوياً فقط، والصور الحقيقية محمية دائماً)."""
+    b = request.get_json(force=True, silent=True) or {}
+    try:
+        limit = max(1, min(int(b.get("limit") or 3), 10))
+    except (TypeError, ValueError):
+        limit = 3
+    try:
+        offset = max(0, int(b.get("offset") or 0))
+    except (TypeError, ValueError):
+        offset = 0
+    force = bool(b.get("force"))
+    url = (get_setting("ai_image_api_url", "") or "").strip()
+    key = (get_setting("ai_image_api_key", "") or "").strip()
+    if not url or not key:
+        return jsonify({"message": "اضبط رابط ومفتاح API الصور أولاً من الإعدادات"}), 400
+    try:
+        from branding import image_prompt_payload
+    except Exception as e:
+        return jsonify({"message": f"تعذّر تحميل مولّد البرومبت: {e}"}), 500
+    import requests as _rq
+    with get_db() as db:
+        if force:
+            rows = db.execute("SELECT id,name,image FROM products ORDER BY id LIMIT ? OFFSET ?",
+                              (limit + 1, offset)).fetchall()
+        else:
+            # دائماً أول دفعة من المتبقي — لأن المعالَج يخرج من قائمة المرشحين،
+            # والـ offset المتزايد كان يتخطى عناصر (خلل تم إصلاحه)
+            rows = db.execute("SELECT id,name,image FROM products ORDER BY id").fetchall()
+            rows = [r for r in rows if _needs_api_image(r[2] if len(r) > 2 else "")]
+            rows = rows[:limit + 1]
+    batch, extra = rows[:limit], rows[limit:]
+    updated, failed = 0, []
+    for pid, name, _img in batch:
+        try:
+            prompt_en, negative_en = image_prompt_payload("product", name or "product")
+            r = _rq.post(url, json={"prompt": prompt_en, "negative_prompt": negative_en, "key": key}, timeout=20)
+            ok, img, err = _extract_ai_image(r)
+        except Exception as e:
+            ok, img, err = False, "", f"تعذّر الاتصال: {e}"
+        if ok and img:
+            with get_db() as db:
+                db.execute("UPDATE products SET image=? WHERE id=?", (img, pid))
+            updated += 1
+        else:
+            failed.append({"id": pid, "name": name, "error": err or "فشل غير معروف"})
+    done = not extra
+    # المتبقي بعد هذه الدفعة — الواجهة تشتق الإجمالي الثابت من أول رد
+    # (doneTotal + remaining)، لأن أي إجمالي يُحسب هنا سينكمش حتماً
+    with get_db() as db:
+        if force:
+            total_now = db.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+        else:
+            all_rows = db.execute("SELECT image FROM products").fetchall()
+            total_now = sum(1 for r in all_rows if _needs_api_image(r[0]))
+    return jsonify({"message": f"الدفعة: نجح {updated} وفشل {len(failed)}",
+                    "updated": updated, "failed": failed,
+                    "total": total_now, "remaining": total_now, "next_offset": offset + limit,
+                    "done": done})
+
 @app.get("/site-icon")
 def site_icon():
     icon = get_setting("app_icon", "") or get_setting("logo_image", "")
@@ -3415,12 +3494,15 @@ def ai_gen():
     url, key = (get_setting("ai_image_api_url", "") or "").strip(), (get_setting("ai_image_api_key", "") or "").strip()
     err_detail = ""
     prompt_en, negative_en = "", ""
+    brand_en, brand_mono = None, None
     try:
-        from branding import to_english, image_prompt_payload
+        from branding import to_english, image_prompt_payload, detect_brand
         prompt_en, negative_en = image_prompt_payload(kind, name)
         name_en = to_english(name)
+        brand_en, brand_mono = detect_brand(name)
     except Exception:
         name_en = (name or "store banner")
+    brand_info = {"name": brand_en, "monogram": brand_mono} if brand_en else None
     if url and key:
         # التوليد عبر API الخارجي أولاً — بالبرومبت الدقيق الإنجليزي الموحد
         custom = (b.get("prompt") or "").strip()
@@ -3438,7 +3520,7 @@ def ai_gen():
             ok, img, err_detail = _extract_ai_image(r)
             if ok:
                 return jsonify({"message": "تم التوليد عبر API ✅", "image": img, "url": img,
-                                "prompt": prompt, "name_en": name_en})
+                                "prompt": prompt, "name_en": name_en, "brand": brand_info})
         except Exception as e:
             err_detail = f"تعذّر الاتصال بخدمة توليد الصور: {e}"
     # fallback: توليد محلي بهوية المتجر حتى لا يبقى المستخدم بلا صورة
@@ -3451,7 +3533,7 @@ def ai_gen():
     else:
         msg = "تم التوليد بهوية المتجر ✅ (لا يوجد API خارجي مضبوط)"
     return jsonify({"message": msg, "image": img, "url": img, "fallback": bool(err_detail),
-                    "prompt": prompt_en, "name_en": name_en})
+                    "prompt": prompt_en, "name_en": name_en, "brand": brand_info})
 
 
 def _extract_ai_image(r):
