@@ -671,10 +671,88 @@ def _get_provider(pid):
     return None
 
 
+def _shams_buy(base, tok, product_ref, player, qty):
+    """طلب عبر نمط client/api (شمس وأشباهه: نفس بروتوكول متاجر الشحن).
+    يرجع (ok, status, porder, resp) حيث status: completed|pending|failed."""
+    import requests as _rq
+    if not (product_ref or "").strip():
+        return False, "failed", "", "الربط ناقص: لا يوجد آيدي منتج المزوّد — أعد الربط من لوحة المزوّدين"
+    ouuid = f"ARAB-{uuid.uuid4().hex}"
+    url = base.rstrip("/") + f"/client/api/newOrder/{product_ref}/params"
+    try:
+        r = _rq.get(url, headers={"api-token": tok},
+                    params={"qty": qty, "playerId": player, "order_uuid": ouuid}, timeout=12)
+    except Exception as e:
+        return False, "pending", "", f"provider-error: {e}"
+    if not r.ok:
+        if r.status_code in (401, 403):
+            return False, "failed", "", f"توكن المزوّد مرفوض (رمز {r.status_code}) — تحقق من التوكن في إعدادات المزوّد"
+        hint = " — تحقق من رابط المزوّد" if r.status_code == 404 else ""
+        return False, "pending", "", f"provider-http-{r.status_code} @ {url}{hint}"
+    try:
+        d = r.json()
+    except Exception:
+        return False, "pending", "", "رد غير صالح من المزوّد (ليس JSON)"
+    if not isinstance(d, dict) or d.get("status") != "OK":
+        msg = ""
+        if isinstance(d, dict):
+            msg = str(d.get("msg") or d.get("message") or "")
+        return False, "failed", "", f"المزوّد رفض الطلب: {msg or r.text[:200]}"
+    data = d.get("data") or {}
+    oid = str(data.get("order_id") or "")
+    pst = str(data.get("status") or "").lower()
+    replay = data.get("replay_api") or []
+    reply = " | ".join(str(x) for x in replay if x) or r.text[:500]
+    if pst in ("accept", "completed", "success"):
+        return True, "completed", oid or f"PV-{uuid.uuid4().hex[:8]}", reply[:500]
+    if pst in ("failed", "rejected", "reject", "error"):
+        return False, "failed", oid, reply[:500]
+    return True, "pending", oid or f"PV-{uuid.uuid4().hex[:8]}", reply[:500]
+
+
+def _shams_check(base, tok, porder):
+    """متابعة طلب عبر نمط client/api. يرجع (status, reply)."""
+    import requests as _rq
+    import json as _j
+    url = base.rstrip("/") + "/client/api/check"
+    for params in ({"orders": _j.dumps([porder])},
+                   {"orders": _j.dumps([porder]), "uuid": "1"}):
+        try:
+            r = _rq.get(url, headers={"api-token": tok}, params=params, timeout=10)
+        except Exception:
+            return "pending", ""
+        if not r.ok:
+            continue
+        try:
+            d = r.json()
+        except Exception:
+            continue
+        if not isinstance(d, dict) or d.get("status") != "OK":
+            continue
+        rows = d.get("data") or []
+        if not rows:
+            continue
+        row = rows[0]
+        pst = str(row.get("status") or "").lower()
+        replay = row.get("replay_api") or []
+        reply = " | ".join(str(x) for x in replay if x)
+        if pst in ("accept", "completed", "success"):
+            return "completed", reply[:500]
+        if pst in ("failed", "rejected", "reject", "error"):
+            return "failed", reply[:500]
+        return "pending", reply[:500]
+    return "pending", ""
+
+
 def provider_buy(sku_row, player, qty, token=None, url=None, product_ref=None, order_path=""):
+    """يرجع (ok, status, porder, resp) حيث status: completed|pending|failed.
+    بدون مسار مخصص: نمط client/api (شمس) مباشرة بلا أي إعداد إضافي.
+    مع مسار مخصص: POST القديم للتوافق."""
     tok = (token or PROVIDER_TOKEN or "").strip()
     base = ((url or PROVIDER_URL or "").strip().rstrip("/") or "https://api.shams4store.com")
-    if tok:
+    if not tok:
+        return True, "completed", f"LOCAL-{uuid.uuid4().hex[:8]}", "تم التنفيذ محلياً (لا يوجد مزوّد مربوط)"
+    if (order_path or "").strip():
         try:
             import requests as _rq
             payload = {"token": tok, "api_token": tok, "product_id": product_ref,
@@ -687,13 +765,13 @@ def provider_buy(sku_row, player, qty, token=None, url=None, product_ref=None, o
                 if isinstance(d, dict):
                     oid = d.get("order_id") or d.get("id") or (d.get("data") or {}).get("order_id") if isinstance(d.get("data"), dict) else d.get("order_id")
                     ok = d.get("status") not in ("error", "failed") and (d.get("status", "OK") in ("OK", "success", "accept", "processing", "completed") or oid)
-                    if ok: return True, str(oid or f"PV-{uuid.uuid4().hex[:8]}"), r.text[:500]
-                    return False, "", str(d.get("message", r.text))[:500]
-                return True, f"PV-{uuid.uuid4().hex[:8]}", r.text[:500]
+                    if ok: return True, "completed", str(oid or f"PV-{uuid.uuid4().hex[:8]}"), r.text[:500]
+                    return False, "failed", "", str(d.get("message", r.text))[:500]
+                return True, "completed", f"PV-{uuid.uuid4().hex[:8]}", r.text[:500]
             hint = " — تحقق من مسار الطلب في إعدادات المزوّد" if r.status_code == 404 else ""
-            return False, "", f"provider-http-{r.status_code} @ {endpoint}{hint}"
-        except Exception as e: return False, "", f"provider-error: {e}"
-    return True, f"LOCAL-{uuid.uuid4().hex[:8]}", "تم التنفيذ محلياً (لا يوجد مزوّد مربوط)"
+            return False, "pending", "", f"provider-http-{r.status_code} @ {endpoint}{hint}"
+        except Exception as e: return False, "pending", "", f"provider-error: {e}"
+    return _shams_buy(base, tok, product_ref, player, qty)
 
 def sku_provider(sku_id):
     """يرجع (token, url, provider_product, provider_id, order_path, status_path, linked)
@@ -724,22 +802,29 @@ def sku_provider(sku_id):
         return empty
 
 def provider_status(porder, provider_id=None):
-    if not porder or porder.startswith("LOCAL-"): return "completed"
+    """يرجع (status, reply) — reply هو رد المزوّد (الرقم/الكود) عند توفره."""
+    if not porder or porder.startswith("LOCAL-"): return "completed", ""
     # أولاً: بيانات مزوّد هذا الطلب نفسه — وإلا لا يمكن متابعة الطلبات المرتبطة
-    tok, base, spath = None, None, ""
+    tok, base, spath, custom = None, None, "", False
     if provider_id:
         prov = _get_provider(provider_id)
         if prov and (prov.get("token") or "").strip():
-            tok, base, spath = prov["token"].strip(), prov["url"], prov.get("status_path", "")
+            tok = prov["token"].strip()
+            base = prov.get("url") or ""
+            spath = prov.get("status_path", "") or ""
+            custom = bool(spath.strip())
     if not tok and PROVIDER_TOKEN:
-        tok, base, spath = PROVIDER_TOKEN, PROVIDER_URL, ""
-    if tok:
+        tok, base = PROVIDER_TOKEN, PROVIDER_URL
+    if not tok:
+        return "completed", ""
+    if custom:
         try:
             import requests as _rq
             r = _rq.get(_pjoin(base, spath, "/api/order-status"), params={"token": tok, "order_id": porder}, timeout=8)
-            if r.ok: return str(r.json().get("status", "pending"))
+            if r.ok: return str(r.json().get("status", "pending")), ""
         except Exception: pass
-    return "completed"
+        return "pending", ""
+    return _shams_check(base, tok, porder)
 
 # ---------- maintenance guard ----------
 @app.before_request
@@ -1081,8 +1166,7 @@ def order_create():
         _ptok, _purl, _ppid, _pvid, _popath, _pspath, _linked = sku_provider(s[0])
         if _linked and not (_ptok or "").strip():
             return jsonify({"message": "هذا المنتج مربوط بمزوّد لكن بياناته ناقصة (توكن فارغ) — أعد إدخال التوكن من لوحة المزوّدين ثم أعد الربط، ولن يتم التنفيذ محلياً"}), 400
-        ok, porder, resp = provider_buy(s, player, qty, _ptok, _purl, _ppid, _popath)
-        status = "completed" if ok else ("pending" if _ptok else "failed")
+        ok, status, porder, resp = provider_buy(s, player, qty, _ptok, _purl, _ppid, _popath)
         if status == "pending":
             notify(0, "طلب معلّق يحتاج تنفيذ ⏳", f"{pname} — {s[2]} — {player}", "info")
         if s[4] is not None: db.execute("UPDATE skus SET stock_qty=stock_qty-1 WHERE id=?", (s[0],))
@@ -1105,7 +1189,10 @@ def order_refresh(oid):
             o = db.execute("SELECT provider_order,status,price_syp FROM orders WHERE id=? AND user_id=?", (oid, uid)).fetchone()
             pvid = None
         if not o: return jsonify({"message": "الطلب غير موجود"}), 404
-        st = provider_status(o[0], pvid)
+        st, reply = provider_status(o[0], pvid)
+        if reply:
+            try: db.execute("UPDATE orders SET response=? WHERE id=?", (reply[:500], oid))
+            except Exception: pass
         if st == o[1]:
             return jsonify({"status": st, "changed": False})
         db.execute("UPDATE orders SET status=? WHERE id=?", (st, oid))
@@ -1244,8 +1331,7 @@ def v1_order():
         _ptok, _purl, _ppid, _pvid, _popath, _pspath, _linked = sku_provider(s[0])
         if _linked and not (_ptok or "").strip():
             return jsonify({"message": "المنتج مربوط بمزوّد لكن التوكن فارغ — أصلح بيانات المزوّد أولاً"}), 400
-        ok, porder, resp = provider_buy(s, player, qty, _ptok, _purl, _ppid, _popath)
-        _vst = "completed" if ok else ("pending" if _ptok else "failed")
+        ok, _vst, porder, resp = provider_buy(s, player, qty, _ptok, _purl, _ppid, _popath)
         db.execute("UPDATE balances SET balance=balance-? WHERE user_id=?", (int(cost * rate()), uid))
         _vcost = float(s[4] if len(s) > 4 and s[4] else cost / max(qty, 1)) * qty
         oid = _insert_order(db, uid, "API", s[2], cost, int(cost * rate()), player, qty, _vst, porder, resp, b.get("order_uuid") or "", _vcost, _pvid)
@@ -2272,8 +2358,7 @@ def _client_place(pid):
         _ptok, _purl, _ppid, _pvid, _popath, _pspath, _linked = sku_provider(s[0])
         if _linked and not (_ptok or "").strip():
             return jsonify({"status": "error", "code": 121, "message": "المنتج مربوط بمزوّد لكن التوكن فارغ"}), 400
-        ok, porder, resp = provider_buy(s, player, qty, _ptok, _purl, _ppid, _popath)
-        _cst = "completed" if ok else ("pending" if _ptok else "failed")
+        ok, _cst, porder, resp = provider_buy(s, player, qty, _ptok, _purl, _ppid, _popath)
         if s[4] is not None: db.execute("UPDATE skus SET stock_qty=stock_qty-? WHERE id=?", (qty, s[0]))
         db.execute("UPDATE balances SET balance=balance-? WHERE user_id=?", (int(cost * rate()), uid))
         _ccost = float(s[8] if len(s) > 8 and s[8] else cost / max(qty, 1)) * qty
@@ -2354,13 +2439,14 @@ def adm_shop_exec(oid):
             tok, url, opath = prov["token"], prov["url"], prov.get("order_path", "")
         if not (tok or "").strip():
             return jsonify({"message": "المزوّد بلا توكن — أضف التوكن أولاً"}), 400
-        ok, porder, resp = provider_buy((0, 0, o[2], 0), o[0], o[1] or 1, tok, url, ref or None, opath)
+        ok, st, porder, resp = provider_buy((0, 0, o[2], 0), o[0], o[1] or 1, tok, url, ref or None, opath)
+        st = st if st in ("completed", "pending", "failed") else ("completed" if ok else "failed")
         try:
             db.execute("UPDATE orders SET status=?,provider_order=?,response=?,cost_usd=?,provider_id=? WHERE id=?",
-                       ("completed" if ok else "failed", porder, (resp or "")[:300], cost, pid, oid))
+                       (st, porder, (resp or "")[:300], cost, pid, oid))
         except Exception:
-            db.execute("UPDATE orders SET status=?,provider_order=?,response=? WHERE id=?", ("completed" if ok else "failed", porder, (resp or "")[:300], oid))
-    return jsonify({"message": "تم التنفيذ ✅" if ok else "فشل التنفيذ", "provider_order": porder})
+            db.execute("UPDATE orders SET status=?,provider_order=?,response=? WHERE id=?", (st, porder, (resp or "")[:300], oid))
+    return jsonify({"message": "تم التنفيذ ✅" if ok else "فشل التنفيذ", "status": st, "provider_order": porder})
 
 # --- أسماء بديلة لمسارات الأصلي ---
 @app.post("/api/admin/users/<int:wid>/api/enable")
@@ -2609,17 +2695,30 @@ def _provider_products(prov):
     try:
         import requests as _rq
         if isinstance(prov, dict):
-            tok, url, cpath = prov.get("token", ""), prov.get("url", ""), prov.get("catalog_path", "")
+            tok, url = prov.get("token", ""), prov.get("url", "")
+            cpath = (prov.get("catalog_path", "") or "").strip()
         else:
             tok = prov[1] if len(prov) > 1 else ""
             url = prov[2] if len(prov) > 2 else ""
             cpath = prov[6] if len(prov) > 6 else ""
-        if not (tok or "").strip():
+            cpath = (cpath or "").strip()
+        tok = (tok or "").strip()
+        if not tok:
             return []
-        r = _rq.post(_pjoin(url, cpath, "/products"), json={"token": (tok or "").strip()}, timeout=10)
-        if r.ok:
-            d = r.json()
-            return d if isinstance(d, list) else d.get("products", [])
+        base = (url or "").strip().rstrip("/") or "https://api.shams4store.com"
+        if cpath:
+            # مسار مخصص: POST القديم
+            r = _rq.post(_pjoin(base, cpath, "/products"), json={"token": tok}, timeout=10)
+            if r.ok:
+                d = r.json()
+                return d if isinstance(d, list) else d.get("products", [])
+            return []
+        # الافتراضي: نمط client/api (شمس)
+        r = _rq.get(base + "/client/api/products", headers={"api-token": tok}, timeout=12)
+        if not r.ok:
+            return []
+        d = r.json()
+        return d if isinstance(d, list) else d.get("products", [])
     except Exception: pass
     return []
 
@@ -2674,10 +2773,22 @@ def adm_prov_test(pid):
                     "verdict": f"❌ تعذّر الوصول: {e} — تحقق من الرابط والإنترنت",
                     "sample": ""}
 
-    checks.append(_probe("الكتالوج", "POST", _pjoin(base, prov.get("catalog_path", ""), "/products"),
-                         json={"token": tok}))
-    checks.append(_probe("الحالة", "GET", _pjoin(base, prov.get("status_path", ""), "/api/order-status"),
-                         params={"token": tok, "order_id": "TEST-PROBE-000"}))
+    cpath = (prov.get("catalog_path", "") or "").strip()
+    spath = (prov.get("status_path", "") or "").strip()
+    opath = (prov.get("order_path", "") or "").strip()
+    if cpath:
+        checks.append(_probe("الكتالوج (مخصص)", "POST", _pjoin(base, cpath, "/products"),
+                             json={"token": tok}))
+    else:
+        checks.append(_probe("الكتالوج", "GET", base + "/client/api/products",
+                             headers={"api-token": tok}))
+    if spath:
+        checks.append(_probe("الحالة (مخصص)", "GET", _pjoin(base, spath, "/api/order-status"),
+                             params={"token": tok, "order_id": "TEST-PROBE-000"}))
+    else:
+        checks.append(_probe("الحالة", "GET", base + "/client/api/check",
+                             headers={"api-token": tok},
+                             params={"orders": '["TEST-PROBE-000"]', "uuid": "1"}))
     n_products = 0
     try:
         items = _provider_products(prov)
@@ -2688,9 +2799,9 @@ def adm_prov_test(pid):
     return jsonify({
         "message": "الاتصال سليم ✅ — المسارات تعمل" if all_ok else "يوجد خلل — راجع تفاصيل الفحص بالأسفل",
         "ok": all_ok,
-        "catalog_url": _pjoin(base, prov.get("catalog_path", ""), "/products"),
-        "order_url": _pjoin(base, prov.get("order_path", ""), "/api/order"),
-        "status_url": _pjoin(base, prov.get("status_path", ""), "/api/order-status"),
+        "catalog_url": _pjoin(base, cpath, "/products") if cpath else base + "/client/api/products",
+        "order_url": _pjoin(base, opath, "/api/order") if opath else base + "/client/api/newOrder/{id}/params",
+        "status_url": _pjoin(base, spath, "/api/order-status") if spath else base + "/client/api/check",
         "products_found": n_products,
         "checks": checks,
     })
