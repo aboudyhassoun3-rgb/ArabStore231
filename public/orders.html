@@ -134,10 +134,10 @@
 
     <div class="detail-row reply-row" id="dReplyRow" style="display:none;">
       <div style="display:flex; align-items:center; justify-content:space-between;">
-        <span class="lbl">الرد</span>
-        <button class="copy-mini" onclick="copyDetailField('dReplyText')"><i class="fa-regular fa-copy"></i></button>
+        <span class="lbl">📩 رد المزوّد</span>
+        <span class="lbl poll-note" id="dPollNote" style="display:none;">🔄 متابعة تلقائية كل 15 ثانية…</span>
       </div>
-      <div class="reply-text" id="dReplyText"></div>
+      <div id="dReplyList" style="display:flex; flex-direction:column; gap:8px;"></div>
       <span id="dReplyChip"></span>
     </div>
 
@@ -248,12 +248,18 @@
       </div>`).join("");
   }
 
+  function refreshToast(r){
+    if(r.status === "completed"){ toast("✅ تم الشحن بنجاح!", "success"); return; }
+    if(r.status === "failed" || r.status === "rejected"){ toast("❌ فشل الطلب — تم استرجاع رصيدك", "error"); return; }
+    toast("📩 وصل رد جديد من المزوّد");
+  }
+
   async function refreshOrder(id, btn){
     btn.disabled=true; btn.innerHTML='<i class="fa-solid fa-spinner fa-spin"></i>';
     try{
       const r = await apiFetch(`/orders/${id}/refresh`);
       if(r.changed){
-        toast(r.status==="completed"?"✅ تم الشحن بنجاح!":"❌ فشل الطلب — تم استرجاع رصيدك", r.status==="completed"?"success":"error");
+        refreshToast(r);
         await loadOrders();
       }else{
         toast("لا يوجد تحديث بعد، حاول لاحقاً");
@@ -263,6 +269,77 @@
   }
 
   let currentDetailId = null;
+  let pollTimer = null;
+  let lastReplyKey = "";
+
+  function replyItemsHTML(items){
+    const meta = {
+      phone: {icon:"fa-phone", label:"📱 رقم الاستلام", cls:"reply-phone"},
+      code: {icon:"fa-key", label:"🔑 رمز التحقق", cls:"reply-code"},
+      text: {icon:"fa-comment-dots", label:"💬 رد المزوّد", cls:"reply-text-item"},
+    };
+    return items.map(it=>{
+      const m = meta[it.kind] || meta.text;
+      const safe = String(it.text ?? "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+      return `<div class="reply-item ${m.cls}">
+        <div class="ri-icon"><i class="fa-solid ${m.icon}"></i></div>
+        <div class="ri-body"><div class="ri-label">${m.label}</div><div class="ri-value" dir="auto">${safe}</div></div>
+        <button class="copy-mini" onclick="copyReplyItem(this)" title="نسخ"><i class="fa-regular fa-copy"></i></button>
+      </div>`;
+    }).join("");
+  }
+
+  function copyReplyItem(btn){
+    const v = btn.closest(".reply-item")?.querySelector(".ri-value")?.textContent || "";
+    if(!v.trim()) return;
+    navigator.clipboard.writeText(v.trim()).then(()=> toast("تم نسخ الرد ✅"));
+  }
+
+  function paintReply(d){
+    const items = d.reply_items || [];
+    const row = document.getElementById("dReplyRow");
+    if(!items.length){ row.style.display = "none"; return ""; }
+    row.style.display = "flex";
+    document.getElementById("dReplyList").innerHTML = replyItemsHTML(items);
+    const chip = document.getElementById("dReplyChip");
+    if(d.status === "accepted"){
+      chip.innerHTML = `<span class="success-chip"><i class="fa-solid fa-circle-check"></i> تم الشحن بنجاح</span>`;
+    }else if(d.status === "rejected"){
+      chip.innerHTML = `<span class="fail-chip"><i class="fa-solid fa-circle-xmark"></i> فشل الطلب</span>`;
+    }else{
+      chip.innerHTML = `<span class="pending-chip"><i class="fa-solid fa-hourglass-half"></i> بانتظار الرد التالي من المزوّد…</span>`;
+    }
+    return items.map(i=>i.kind+":"+i.text).join("|");
+  }
+
+  function stopPoll(){
+    if(pollTimer){ clearInterval(pollTimer); pollTimer = null; }
+    const n = document.getElementById("dPollNote");
+    if(n) n.style.display = "none";
+  }
+
+  function startPoll(){
+    stopPoll();
+    const n = document.getElementById("dPollNote");
+    if(n) n.style.display = "";
+    pollTimer = setInterval(pollDetailSilent, 15000);
+  }
+
+  async function pollDetailSilent(){
+    if(!currentDetailId) return stopPoll();
+    try{
+      const r = await apiFetch(`/orders/${currentDetailId}/refresh`);
+      if(!r.changed) return;
+      const key = (r.reply_items||[]).map(i=>i.kind+":"+i.text).join("|");
+      const isNew = key && key !== lastReplyKey;
+      lastReplyKey = key;
+      await loadOrders();
+      await viewDetail(currentDetailId);
+      if(r.status === "completed") toast("✅ تم الشحن بنجاح!", "success");
+      else if(r.status === "failed" || r.status === "rejected") toast("❌ فشل الطلب — تم استرجاع رصيدك", "error");
+      else if(isNew) toast("📩 وصل رد جديد من المزوّد");
+    }catch(e){ /* فشل صامت — تُعاد المحاولة بعد 15 ثانية */ }
+  }
 
   async function viewDetail(id){
     try{
@@ -295,30 +372,19 @@
         ? `مدة الاستجابة: ${d.response_time_text}`
         : (d.source === "api" ? "بانتظار رد المزوّد..." : "");
 
-      const replyRow = document.getElementById("dReplyRow");
-      const replyChip = document.getElementById("dReplyChip");
-      if(d.api_response){
-        replyRow.style.display = "flex";
-        document.getElementById("dReplyText").textContent = d.api_response;
-        if(d.status === "accepted"){
-          replyChip.innerHTML = `<span class="success-chip"><i class="fa-solid fa-circle-check"></i> تم الشحن بنجاح</span>`;
-        }else if(d.status === "rejected"){
-          replyChip.innerHTML = `<span class="fail-chip"><i class="fa-solid fa-circle-xmark"></i> فشل الطلب</span>`;
-        }else{
-          replyChip.innerHTML = "";
-        }
-      }else{
-        replyRow.style.display = "none";
-      }
+      lastReplyKey = paintReply(d);
 
       const refreshBtn = document.getElementById("dRefreshBtn");
       refreshBtn.style.display = (d.source === "api" && d.status === "pending") ? "block" : "none";
+
+      if(d.source === "api" && d.status === "pending") startPoll(); else stopPoll();
 
       window.scrollTo({ top:0, behavior:"smooth" });
     }catch(err){ toast("تعذّر جلب التفاصيل","error"); }
   }
 
   function backToList(){
+    stopPoll();
     document.getElementById("orderDetailView").style.display = "none";
     document.getElementById("ordersListView").style.display = "block";
     document.getElementById("ordersPageHead").style.display = "block";
@@ -338,7 +404,7 @@
     try{
       const r = await apiFetch(`/orders/${currentDetailId}/refresh`);
       if(r.changed){
-        toast(r.status==="completed"?"✅ تم الشحن بنجاح!":"❌ فشل الطلب — تم استرجاع رصيدك", r.status==="completed"?"success":"error");
+        refreshToast(r);
         await loadOrders();
         await viewDetail(currentDetailId);
       }else{

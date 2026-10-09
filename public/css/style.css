@@ -1123,6 +1123,37 @@ img{ max-width:100%; display:block; }
   background:var(--danger-soft); color:var(--danger); font-size:11px; font-weight:800;
   padding:6px 13px; border-radius:20px;
 }
+.detail-row.reply-row .pending-chip{
+  display:flex; align-items:center; gap:6px; align-self:flex-start;
+  background:var(--warning-soft); color:var(--warning); font-size:11px; font-weight:800;
+  padding:6px 13px; border-radius:20px;
+}
+.poll-note{ animation:poll-blink 2s ease-in-out infinite; }
+@keyframes poll-blink{ 0%,100%{opacity:1;} 50%{opacity:.45;} }
+/* بطاقات الرد المنظمة: رقم / رمز / نص — كل عنصر بزر نسخ مستقل */
+.reply-item{
+  display:flex; align-items:center; gap:10px;
+  background:var(--card-soft); border:1px solid var(--border);
+  border-radius:14px; padding:11px 12px;
+}
+.reply-item .ri-icon{
+  width:38px; height:38px; border-radius:12px; flex-shrink:0;
+  display:flex; align-items:center; justify-content:center; font-size:17px;
+}
+.reply-item.reply-phone{ border-color:rgba(45,212,167,.45); }
+.reply-item.reply-phone .ri-icon{ background:var(--success-soft); color:var(--success); }
+.reply-item.reply-code{ border-color:rgba(255,194,75,.5); }
+.reply-item.reply-code .ri-icon{ background:var(--warning-soft); color:var(--warning); }
+.reply-item.reply-text-item .ri-icon{ background:var(--accent-soft); color:var(--accent); }
+.reply-item .ri-body{ flex:1; min-width:0; }
+.reply-item .ri-label{ font-size:10.5px; color:var(--muted); margin-bottom:3px; }
+.reply-item .ri-value{ font-size:14px; font-weight:800; color:var(--text); word-break:break-all; line-height:1.7; }
+.reply-item.reply-phone .ri-value, .reply-item.reply-code .ri-value{
+  font-family:'Orbitron',monospace; font-size:16px; letter-spacing:1px;
+}
+.reply-item.reply-phone .ri-value{ color:var(--success); }
+.reply-item.reply-code .ri-value{ color:var(--gold); }
+.reply-item .copy-mini{ margin-right:0; font-size:15px; }
 .back-pill{
   display:inline-flex; align-items:center; gap:6px; padding:9px 18px; border-radius:30px;
   background:var(--card-soft); border:1px solid var(--border); color:var(--text); font-size:12px; font-weight:700;

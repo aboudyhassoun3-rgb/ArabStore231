@@ -702,7 +702,9 @@ def _shams_buy(base, tok, product_ref, player, qty):
     oid = str(data.get("order_id") or "")
     pst = str(data.get("status") or "").lower()
     replay = data.get("replay_api") or []
-    reply = " | ".join(str(x) for x in replay if x) or r.text[:500]
+    # إن كانت القائمة فارغة (شائع عند الإنشاء: wait بلا رد بعد) لا نخزّن JSON خاماً قبيحاً —
+    # سيصل الرد الحقيقي لاحقاً عبر التحديث ويُعرض منظماً
+    reply = " | ".join(str(x) for x in replay if x)
     if pst in ("accept", "completed", "success"):
         return True, "completed", oid or f"PV-{uuid.uuid4().hex[:8]}", reply[:500]
     if pst in ("failed", "rejected", "reject", "error"):
@@ -1189,12 +1191,19 @@ def order_refresh(oid):
             o = db.execute("SELECT provider_order,status,price_syp FROM orders WHERE id=? AND user_id=?", (oid, uid)).fetchone()
             pvid = None
         if not o: return jsonify({"message": "الطلب غير موجود"}), 404
+        old_reply = (db.execute("SELECT response FROM orders WHERE id=?", (oid,)).fetchone() or [""])[0] or ""
         st, reply = provider_status(o[0], pvid)
-        if reply:
+        if reply and reply != old_reply:
             try: db.execute("UPDATE orders SET response=? WHERE id=?", (reply[:500], oid))
             except Exception: pass
+        # التغيّر يُحتسب على الحالة أو الرد (رقم وصل ثم رمز لاحقاً)
+        latest = reply or old_reply
+        if st == o[1] and (not reply or reply == old_reply):
+            return jsonify({"status": st, "changed": False,
+                            "reply": latest, "reply_items": _parse_reply_items(latest)})
         if st == o[1]:
-            return jsonify({"status": st, "changed": False})
+            return jsonify({"status": st, "changed": True,
+                            "reply": latest, "reply_items": _parse_reply_items(latest)})
         db.execute("UPDATE orders SET status=? WHERE id=?", (st, oid))
         if st == "failed":
             # استرجاع الرصيد مرة واحدة عند أول تحوّل للفشل
@@ -1203,12 +1212,45 @@ def order_refresh(oid):
             try: db.execute("INSERT INTO transactions(user_id,type,amount,note) VALUES(?, 'in', ?, ?)", (uid, int(o[2] or 0), f"استرجاع رصيد طلب فاشل #{oid}"))
             except Exception: pass
             notify(uid, "❌ فشل الطلب", f"تم استرجاع {int(o[2] or 0):,} ل.س إلى رصيدك", "error")
-    return jsonify({"status": st, "changed": True})
+    return jsonify({"status": st, "changed": True,
+                    "reply": latest, "reply_items": _parse_reply_items(latest)})
 
 def _order_source(provider_order):
     """api إذا نُفّذ عبر مزوّد حقيقي (له رد يُعرض)، وإلا shop."""
     po = str(provider_order or "")
     return "api" if (po and not po.startswith("LOCAL-")) else "shop"
+
+
+# رسائل داخلية لا تُعرض للمستخدم كـ"رد مزوّد" (ضجيج تقني)
+_TECHNICAL_REPLY_MARKERS = ("تم التنفيذ محلياً", "provider-http-", "provider-error")
+
+
+def _parse_reply_items(reply):
+    """يحوّل نص رد المزوّد لعناصر منظمة للعرض الجميل:
+    [{text, kind}] حيث kind: phone (رقم) / code (رمز) / text (نص).
+    يتجاهل الرسائل التقنية الداخلية ويرجع [] عند غياب رد حقيقي."""
+    import re as _re
+    text = (reply or "").strip()
+    if not text:
+        return []
+    if any(m in text for m in _TECHNICAL_REPLY_MARKERS):
+        return []
+    items = []
+    for part in [p.strip() for p in text.split("|")]:
+        if not part:
+            continue
+        digits = _re.sub(r"\D", "", part)
+        compact = part.replace(" ", "")
+        if "+" in part and len(digits) >= 7:
+            kind = "phone"
+        elif digits and compact == digits and 3 <= len(digits) <= 10 and len(part) <= 14:
+            kind = "code"
+        elif 4 <= len(compact) <= 24 and _re.fullmatch(r"[A-Za-z0-9\-_]+", compact) and any(ch.isdigit() for ch in compact):
+            kind = "code"
+        else:
+            kind = "text"
+        items.append({"text": part, "kind": kind})
+    return items
 
 @app.get("/api/orders/<int:oid>/detail")
 @require_auth
@@ -1221,6 +1263,7 @@ def order_detail(oid):
     status = "accepted" if raw == "completed" else ("rejected" if raw == "failed" else "pending")
     porder = o[8] or ""
     via_provider = _order_source(porder) == "api"
+    reply_items = _parse_reply_items(o[9])
     return jsonify({"id": o[0],
                     "product_name": o[1], "product": o[1],
                     "category_name": o[2], "category": o[2],
@@ -1232,6 +1275,8 @@ def order_detail(oid):
                     "ext_order_id": porder if via_provider else "",
                     "provider_order": porder,
                     "api_response": o[9] or "",
+                    "reply_items": reply_items,
+                    "has_reply": bool(reply_items),
                     "response_time_text": ""})
 
 @app.get("/api/user/activity")
