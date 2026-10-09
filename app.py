@@ -571,30 +571,72 @@ def require_admin(f):
         request.ap = p; return f(*a, **kw)
     return w
 
+_MIME_BY_EXT = {"png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
+                "webp": "image/webp", "gif": "image/gif", "svg": "image/svg+xml"}
+
+def _put_site_file(name, data_bytes, mime):
+    """نسخة دائمة من الملف داخل قاعدة البيانات — تنجو من فقدان /tmp على Vercel."""
+    try:
+        import base64 as _b64
+        b64 = _b64.b64encode(data_bytes).decode("ascii")
+        with get_db() as db:
+            if USE_PG:
+                db.execute("INSERT INTO site_files(name,data,mime) VALUES(?,?,?) "
+                           "ON CONFLICT(name) DO UPDATE SET data=excluded.data, mime=excluded.mime, created_at=CURRENT_TIMESTAMP",
+                           (name, b64, mime))
+            else:
+                db.execute("INSERT OR REPLACE INTO site_files(name,data,mime,created_at) VALUES(?,?,?,CURRENT_TIMESTAMP)",
+                           (name, b64, mime))
+    except Exception as e:
+        print(f"WARNING: site_files store failed: {e}")
+
+
+def _get_site_file(name):
+    """يرجع (bytes, mime) أو (None, None)."""
+    try:
+        with get_db() as db:
+            r = db.execute("SELECT data, mime FROM site_files WHERE name=?", (name,)).fetchone()
+        if not r or not r[0]:
+            return None, None
+        import base64 as _b64
+        return _b64.b64decode(r[0]), (r[1] or "image/png")
+    except Exception:
+        return None, None
+
+
 def save_upload(fs):
     if not fs or not fs.filename: return ""
     ext = fs.filename.rsplit(".", 1)[-1].lower() if "." in fs.filename else ""
     if ext not in ALLOWED_IMG: return ""
     name = f"{uuid.uuid4().hex}.{ext}"
-    # supabase?
+    mime = (getattr(fs, "mimetype", "") or "").strip() or _MIME_BY_EXT.get(ext, "image/png")
+    try:
+        data = fs.read()
+    except Exception:
+        data = b""
+    if not data: return ""
+    # supabase? (تخزين دائم خارجي — لا حاجة لنسخة DB)
     surl, skey = os.environ.get("SUPABASE_URL", "").strip().rstrip("/"), os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
     bucket = os.environ.get("ARAB_STORAGE_BUCKET", "store-assets").strip() or "store-assets"
     if surl and skey:
         try:
             import requests as _rq
-            data = fs.read()
             r = _rq.post(f"{surl}/storage/v1/object/{bucket}/{name}",
                          headers={"Authorization": f"Bearer {skey}", "apikey": skey,
-                                  "Content-Type": fs.mimetype or "image/png", "x-upsert": "true"},
-                          data=data, timeout=8)
+                                  "Content-Type": mime, "x-upsert": "true"},
+                         data=data, timeout=8)
             r.raise_for_status()
             return f"{surl}/storage/v1/object/public/{bucket}/{name}"
         except Exception: pass
-    fs.stream.seek(0) if hasattr(fs.stream, "seek") else None
-    try: fs.save(os.path.join(UPLOAD_DIR, secure_filename(name)))
+    safe = secure_filename(name)
+    try:
+        with open(os.path.join(UPLOAD_DIR, safe), "wb") as fh: fh.write(data)
     except Exception:
-        with open(os.path.join(UPLOAD_DIR, secure_filename(name)), "wb") as fh: fh.write(fs.read())
-    return f"/uploads/{secure_filename(name)}"
+        try: fs.save(os.path.join(UPLOAD_DIR, safe))
+        except Exception: return ""
+    # نسخة DB دائمة — هي ما يجعل الشعار ثابتاً على Vercel بعد اختفاء /tmp
+    _put_site_file(safe, data, mime)
+    return f"/uploads/{safe}"
 
 # provider (real attempt + graceful mock)
 def provider_buy(sku_row, player, qty, token=None, url=None, product_ref=None):
@@ -1850,6 +1892,7 @@ CREATE TABLE IF NOT EXISTS import_items(batch_id TEXT, kind TEXT, ref_id INTEGER
 CREATE TABLE IF NOT EXISTS bot_admins(user_id INTEGER PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS auth_tokens(token TEXT PRIMARY KEY, web_id INTEGER, is_admin INTEGER DEFAULT 0, is_owner INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS snapshots(id TEXT PRIMARY KEY, reason TEXT DEFAULT '', payload TEXT DEFAULT '', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
+CREATE TABLE IF NOT EXISTS site_files(name TEXT PRIMARY KEY, data TEXT DEFAULT '', mime TEXT DEFAULT 'image/png', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 """
 def ensure_extra():
     with _init_db_conn() as db:
@@ -2716,6 +2759,26 @@ def adm_devlogo(): return _save_setting_file("dev_logo")
 @require_admin
 def adm_appicon(): return _save_setting_file("app_icon")
 
+
+def _clear_setting(key):
+    set_setting(key, "")
+    return jsonify({"message": "تمت الإزالة ✅"})
+
+
+@app.delete("/api/admin/settings/logo")
+@require_admin
+def adm_logo_del(): return _clear_setting("logo_image")
+
+
+@app.delete("/api/admin/settings/dev-logo")
+@require_admin
+def adm_devlogo_del(): return _clear_setting("dev_logo")
+
+
+@app.delete("/api/admin/settings/app-icon")
+@require_admin
+def adm_appicon_del(): return _clear_setting("app_icon")
+
 @app.post("/api/admin/settings/banner-image")
 @require_admin
 def adm_banner_file():
@@ -3053,7 +3116,8 @@ SNAP_TABLES = ("settings", "sections", "subsections", "products", "skus",
                "web_users", "balances", "user_tier", "tiers",
                "deposit_manual", "deposit_auto", "deposit_requests", "orders",
                "transactions", "notifications", "banners", "web_admins",
-               "bot_admins", "providers", "category_links", "referrals")
+               "bot_admins", "providers", "category_links", "referrals",
+               "site_files")
 
 def _table_cols(db, table):
     try:
@@ -3118,7 +3182,23 @@ def _auto_snapshot(reason="auto"):
 
 # ---------- static ----------
 @app.get("/uploads/<path:f>")
-def upl(f): return send_from_directory(UPLOAD_DIR, f)
+def upl(f):
+    name = secure_filename((f or "").split("/")[-1])
+    if not name:
+        return jsonify({"message": "غير موجود"}), 404
+    p = os.path.join(UPLOAD_DIR, name)
+    if os.path.isfile(p):
+        return send_from_directory(UPLOAD_DIR, name)
+    # الملف المحلي ضاع (طبيعي على Vercel) — قدّم النسخة الدائمة من قاعدة البيانات
+    data, mime = _get_site_file(name)
+    if data:
+        # أعد كتابته محلياً أيضاً لتسريع الطلبات التالية على نفس النسخة
+        try:
+            with open(p, "wb") as fh: fh.write(data)
+        except Exception: pass
+        return app.response_class(data, mimetype=mime or "image/png",
+                                  headers={"Cache-Control": "public, max-age=86400"})
+    return jsonify({"message": "الصورة غير موجودة — أعد رفعها من لوحة التحكم"}), 404
 
 @app.get("/brand/<int:pid>.svg")
 def brand_img(pid):
@@ -3149,7 +3229,7 @@ def root(): return send_from_directory(app.static_folder, "store.html")
 def health():
     surl = os.environ.get("SUPABASE_URL", "").strip()
     skey = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-    info = {"ok": True, "pg": USE_PG, "build": "20261008-ratelimit-json",
+    info = {"ok": True, "pg": USE_PG, "build": "20261009-logo-persist",
             "time": datetime.now().isoformat(),
             "storage": "persistent-postgres" if USE_PG else "ephemeral (set DATABASE_URL or data will be lost)",
             "uploads": "supabase" if (surl and skey) else "ephemeral-tmp (set SUPABASE_* or uploaded images may vanish)"}
