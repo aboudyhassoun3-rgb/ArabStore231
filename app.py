@@ -182,6 +182,64 @@ def save_svg_bytes(svg_text, filename):
         fh.write(data)
     return f"/uploads/{name}"
 
+def save_png_bytes(data, filename):
+    """يحفظ PNG (مختوم الشعار) في Supabase أو محلياً + نسخة DB دائمة. يرجع الرابط أو ''."""
+    import uuid as _uuid
+    name = secure_filename(filename or f"{_uuid.uuid4().hex}.png")
+    if not name.lower().endswith(".png"):
+        name += ".png"
+    mime = "image/png"
+    surl, skey = os.environ.get("SUPABASE_URL", "").strip().rstrip("/"), os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    bucket = os.environ.get("ARAB_STORAGE_BUCKET", "store-assets").strip() or "store-assets"
+    if surl and skey:
+        try:
+            import requests as _rq
+            r = _rq.post(f"{surl}/storage/v1/object/{bucket}/{name}",
+                         headers={"Authorization": f"Bearer {skey}", "apikey": skey,
+                                  "Content-Type": mime, "x-upsert": "true"},
+                         data=data, timeout=8)
+            r.raise_for_status()
+            return f"{surl}/storage/v1/object/public/{bucket}/{name}"
+        except Exception:
+            pass
+    try:
+        with open(os.path.join(UPLOAD_DIR, name), "wb") as fh:
+            fh.write(data)
+    except Exception:
+        return ""
+    _put_site_file(name, data, mime)
+    return f"/uploads/{name}"
+
+
+def fetch_stamp_save(img_url):
+    """يجلب صورة API خارجي، يختم عليها شعار المتجر، ويحفظها دائماً.
+    يرجع (final_url, stamped:bool, note). عند أي فشل يرجع الرابط الأصلي."""
+    try:
+        import requests as _rq
+        r = _rq.get(img_url, timeout=15)
+        r.raise_for_status()
+        ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype and not ctype.startswith("image/"):
+            return img_url, False, "not-image"
+        data = r.content
+        if not data or len(data) > 12 * 1024 * 1024:
+            return img_url, False, "bad-size"
+    except Exception as e:
+        return img_url, False, f"download-failed: {e}"
+    try:
+        from branding import stamp_store_badge
+        stamped = stamp_store_badge(data)
+    except Exception:
+        stamped = None
+    if not stamped:
+        return img_url, False, "stamp-unavailable"
+    import uuid as _uuid
+    saved = save_png_bytes(stamped, f"ai-{_uuid.uuid4().hex}.png")
+    if not saved:
+        return img_url, False, "save-failed"
+    return saved, True, "stamped"
+
+
 def branded_image_url(product_name, store_name=None):
     """صورة تلقائية للمنتج: تدرّج + إيموجي + الاسم + شريط المتجر. ترجع '' عند الفشل."""
     try:
@@ -3423,8 +3481,9 @@ def adm_brand_images_bulk():
         except Exception as e:
             ok, img, err = False, "", f"تعذّر الاتصال: {e}"
         if ok and img:
+            final, stamped, _note = fetch_stamp_save(img)
             with get_db() as db:
-                db.execute("UPDATE products SET image=? WHERE id=?", (img, pid))
+                db.execute("UPDATE products SET image=? WHERE id=?", (final, pid))
             updated += 1
         else:
             failed.append({"id": pid, "name": name, "error": err or "فشل غير معروف"})
@@ -3519,8 +3578,14 @@ def ai_gen():
             r = _rq.post(url, json={"prompt": prompt, "negative_prompt": negative_en, "key": key}, timeout=25)
             ok, img, err_detail = _extract_ai_image(r)
             if ok:
-                return jsonify({"message": "تم التوليد عبر API ✅", "image": img, "url": img,
-                                "prompt": prompt, "name_en": name_en, "brand": brand_info})
+                final, stamped, note = fetch_stamp_save(img)
+                if stamped:
+                    msg = "تم التوليد عبر API مع شعار المتجر ✅"
+                else:
+                    msg = f"تم التوليد عبر API ✅ (تعذّر ختم الشعار: {note})"
+                return jsonify({"message": msg, "image": final, "url": final,
+                                "prompt": prompt, "name_en": name_en, "brand": brand_info,
+                                "stamped": stamped})
         except Exception as e:
             err_detail = f"تعذّر الاتصال بخدمة توليد الصور: {e}"
     # fallback: توليد محلي بهوية المتجر حتى لا يبقى المستخدم بلا صورة

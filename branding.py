@@ -494,3 +494,87 @@ def image_prompt_payload(kind, name):
 
 def brand_filename(name):
     return "brand-" + hashlib.md5((name or "").encode("utf-8")).hexdigest()[:12] + ".svg"
+
+
+# ------------------------------------------------------------------
+# ختم شعار المتجر على الصور Raster (صور API الخارجي / المرفوعة يدوياً)
+# نفس تصميم شارة SVG: خلفية داكنة + إطار ذهبي + AS ذهبي + ARAB STORE
+# ------------------------------------------------------------------
+def _badge_font(size, serif=False):
+    """خط متاح دائماً — DejaVu إن وُجد وإلا خط Pillow الافتراضي."""
+    import os as _os
+    candidates = []
+    if serif:
+        candidates += [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSerif-BoldItalic.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSerif-Bold.ttf",
+        ]
+    else:
+        candidates += [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+        ]
+    try:
+        from PIL import ImageFont as _IF
+        for path in candidates:
+            if _os.path.isfile(path):
+                try:
+                    return _IF.truetype(path, size)
+                except Exception:
+                    continue
+        try:
+            return _IF.load_default(size=size)
+        except TypeError:
+            return _IF.load_default()
+    except Exception:
+        return None
+
+
+def stamp_store_badge(image_bytes):
+    """يختم شعار AS الذهبي أعلى-يسار الصورة. يرجع PNG bytes أو None عند أي فشل
+    (مكتبة ناقصة، ملف تالف...) — المتصل يُبقي الصورة الأصلية حينها."""
+    try:
+        from PIL import Image as _Img, ImageDraw as _Draw
+        import io as _io
+    except Exception:
+        return None
+    try:
+        if not image_bytes or len(image_bytes) > 12 * 1024 * 1024:
+            return None
+        img = _Img.open(_io.BytesIO(image_bytes))
+        img = img.convert("RGBA")
+        W, H = img.size
+        if W < 120 or H < 60:
+            return None  # صغيرة جداً — الختم سيغطيها
+        bw, bh, mg = int(W * 0.24), int(W * 0.24 * 0.36), int(W * 0.035)
+        bw, bh = max(bw, 96), max(bh, 34)
+        mg = max(mg, 12)
+        overlay = _Img.new("RGBA", img.size, (0, 0, 0, 0))
+        dr = _Draw.Draw(overlay)
+        gold = (255, 194, 75, 255)
+        # خلفية الشارة
+        dr.rounded_rectangle([mg, mg, mg + bw, mg + bh], radius=max(6, bh // 3),
+                             fill=(0, 0, 0, 140), outline=gold,
+                             width=max(2, W // 400))
+        # نص AS بخط عريض مائل (تقليد الشعار الذهبي)
+        fs_big = max(14, int(bh * 0.58))
+        f_big = _badge_font(fs_big, serif=True) or _badge_font(fs_big)
+        dr.text((mg + int(bw * 0.07), mg + int(bh * 0.08)), "AS",
+                font=f_big, fill=gold)
+        try:
+            abb = dr.textbbox((0, 0), "AS", font=f_big)
+            as_w = abb[2] - abb[0]
+        except Exception:
+            as_w = int(bw * 0.32)
+        # ARAB STORE بخط صغير
+        fs_small = max(8, int(bh * 0.26))
+        f_small = _badge_font(fs_small)
+        tx = mg + int(bw * 0.07) + as_w + max(4, int(bw * 0.04))
+        dr.text((tx, mg + int(bh * 0.12)), "ARAB", font=f_small, fill=gold)
+        dr.text((tx, mg + int(bh * 0.46)), "STORE", font=f_small, fill=(255, 255, 255, 255))
+        img = _Img.alpha_composite(img, overlay).convert("RGB")
+        buf = _io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+    except Exception:
+        return None
