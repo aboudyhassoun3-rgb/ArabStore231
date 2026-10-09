@@ -1118,13 +1118,16 @@ async function importProviderFile(){
 }
 async function addProvider(){
   const name = document.getElementById("providerName").value.trim();
-  const api_token = document.getElementById("providerToken").value.trim();
-  const api_url = document.getElementById("providerUrl").value.trim();
-  if(!name || !api_token || !api_url){ toast("عبّي كل الحقول", "error"); return; }
+  const token = document.getElementById("providerToken").value.trim();
+  const url = document.getElementById("providerUrl").value.trim();
+  const order_path = document.getElementById("providerOrderPath")?.value.trim() || "";
+  const status_path = document.getElementById("providerStatusPath")?.value.trim() || "";
+  const catalog_path = document.getElementById("providerCatalogPath")?.value.trim() || "";
+  if(!name || !token || !url){ toast("عبّي الاسم والتوكن والرابط", "error"); return; }
   try{
-    await adminFetch("/admin/providers", { method:"POST", body: JSON.stringify({ name, api_token, api_url }) });
+    await adminFetch("/admin/providers", { method:"POST", body: JSON.stringify({ name, token, url, order_path, status_path, catalog_path }) });
     toast("تمت إضافة المزوّد ✅");
-    ["providerName","providerToken","providerUrl"].forEach(id=> document.getElementById(id).value = "");
+    ["providerName","providerToken","providerUrl","providerOrderPath","providerStatusPath","providerCatalogPath"].forEach(id=>{ const el = document.getElementById(id); if(el) el.value = ""; });
     loadProviders();
   }catch(err){ toast(err.message, "error"); }
 }
@@ -1563,7 +1566,7 @@ async function confirmLink(){
   const btn = document.getElementById("linkConfirmBtn");
   btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>';
   try{
-    const r = await adminFetch(`/admin/categories/${linkCategoryId}/link`, { method:"POST", body: JSON.stringify({ provider_id: Number(provider_id), api_product_id }) });
+    const r = await adminFetch(`/admin/categories/${linkCategoryId}/link`, { method:"POST", body: JSON.stringify({ provider_id: Number(provider_id), provider_product: api_product_id }) });
     toast("✅ " + r.message); closeLinkModal(); loadCategories();
   }catch(err){ toast(err.message, "error"); }
   btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-link"></i> حفظ الربط';
