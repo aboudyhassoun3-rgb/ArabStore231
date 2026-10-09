@@ -694,9 +694,10 @@ def provider_buy(sku_row, player, qty, token=None, url=None, product_ref=None, o
     return True, f"LOCAL-{uuid.uuid4().hex[:8]}", "تم التنفيذ محلياً (لا يوجد مزوّد مربوط)"
 
 def sku_provider(sku_id):
-    """يرجع (token, url, provider_product, provider_id, order_path, status_path)
-    للباقة المرتبطة — و(None,None,None,None,"","") عند غياب الربط."""
-    empty = (None, None, None, None, "", "")
+    """يرجع (token, url, provider_product, provider_id, order_path, status_path, linked)
+    للباقة — و(None,None,None,None,"","",False) عند غياب الربط تماماً.
+    linked=True مع توكن فارغ تعني ربطاً معطوباً يجب إصلاحه لا تجاهله."""
+    empty = (None, None, None, None, "", "", False)
     try:
         with get_db() as db:
             try:
@@ -704,12 +705,18 @@ def sku_provider(sku_id):
                                "FROM category_links l JOIN providers p ON p.id=l.provider_id WHERE l.category_id=?",
                                (sku_id,)).fetchone()
                 if r:
-                    return (r[0], r[1], r[2], r[3], r[4] or "", r[5] or "")
+                    return (r[0], r[1], r[2], r[3], r[4] or "", r[5] or "", True)
             except Exception:
                 r = db.execute("SELECT p.token,p.url,l.provider_product,l.provider_id FROM category_links l "
                                "JOIN providers p ON p.id=l.provider_id WHERE l.category_id=?", (sku_id,)).fetchone()
                 if r:
-                    return (r[0], r[1], r[2], r[3], "", "")
+                    return (r[0], r[1], r[2], r[3], "", "", True)
+            # ربط موجود لكن المزوّد نفسه محذوف؟ اعتبره مربوطاً معطوباً
+            try:
+                if db.execute("SELECT 1 FROM category_links WHERE category_id=?", (sku_id,)).fetchone():
+                    return (None, None, None, None, "", "", True)
+            except Exception:
+                pass
         return empty
     except Exception:
         return empty
@@ -1069,7 +1076,9 @@ def order_create():
         price_usd = round(float(s[3]) * (1 - disc / 100), 4); r = rate(); price_syp = int(price_usd * r * qty)
         bal = balance_of(uid)
         if bal < price_syp: return jsonify({"message": f"رصيدك غير كافٍ ({bal:,} ل.س). اشحن محفظتك أولاً 💳"}), 402
-        _ptok, _purl, _ppid, _pvid, _popath, _pspath = sku_provider(s[0])
+        _ptok, _purl, _ppid, _pvid, _popath, _pspath, _linked = sku_provider(s[0])
+        if _linked and not (_ptok or "").strip():
+            return jsonify({"message": "هذا المنتج مربوط بمزوّد لكن بياناته ناقصة (توكن فارغ) — أعد إدخال التوكن من لوحة المزوّدين ثم أعد الربط، ولن يتم التنفيذ محلياً"}), 400
         ok, porder, resp = provider_buy(s, player, qty, _ptok, _purl, _ppid, _popath)
         status = "completed" if ok else ("pending" if _ptok else "failed")
         if status == "pending":
@@ -1230,7 +1239,9 @@ def v1_order():
         if not s: return jsonify({"message": "sku غير موجود"}), 404
         cost = float(s[3]) * qty; bal = balance_of(uid)
         if bal < int(cost * rate()): return jsonify({"message": "رصيد غير كافٍ"}), 402
-        _ptok, _purl, _ppid, _pvid, _popath, _pspath = sku_provider(s[0])
+        _ptok, _purl, _ppid, _pvid, _popath, _pspath, _linked = sku_provider(s[0])
+        if _linked and not (_ptok or "").strip():
+            return jsonify({"message": "المنتج مربوط بمزوّد لكن التوكن فارغ — أصلح بيانات المزوّد أولاً"}), 400
         ok, porder, resp = provider_buy(s, player, qty, _ptok, _purl, _ppid, _popath)
         _vst = "completed" if ok else ("pending" if _ptok else "failed")
         db.execute("UPDATE balances SET balance=balance-? WHERE user_id=?", (int(cost * rate()), uid))
@@ -2256,7 +2267,9 @@ def _client_place(pid):
         cost = float(s[3] or 0) * qty
         if balance_of(uid) < int(cost * rate()): return jsonify({"status": "error", "code": 100, "message": "رصيد غير كافٍ"}), 400
         p = db.execute("SELECT name FROM products WHERE id=?", (s[1],)).fetchone()
-        _ptok, _purl, _ppid, _pvid, _popath, _pspath = sku_provider(s[0])
+        _ptok, _purl, _ppid, _pvid, _popath, _pspath, _linked = sku_provider(s[0])
+        if _linked and not (_ptok or "").strip():
+            return jsonify({"status": "error", "code": 121, "message": "المنتج مربوط بمزوّد لكن التوكن فارغ"}), 400
         ok, porder, resp = provider_buy(s, player, qty, _ptok, _purl, _ppid, _popath)
         _cst = "completed" if ok else ("pending" if _ptok else "failed")
         if s[4] is not None: db.execute("UPDATE skus SET stock_qty=stock_qty-? WHERE id=?", (qty, s[0]))
@@ -2456,8 +2469,8 @@ def adm_all_pricing():
         rows = db.execute("SELECT s.id,s.name,s.price,s.cost,p.name FROM skus s LEFT JOIN products p ON p.id=s.product_id ORDER BY s.id").fetchall()
         links = {}
         try:
-            for lr in db.execute("SELECT l.category_id,p.name,l.provider_product FROM category_links l JOIN providers p ON p.id=l.provider_id").fetchall():
-                links[lr[0]] = {"provider_name": lr[1], "api_product_id": lr[2] or ""}
+            for lr in db.execute("SELECT l.category_id,p.name,l.provider_product,p.token FROM category_links l JOIN providers p ON p.id=l.provider_id").fetchall():
+                links[lr[0]] = {"provider_name": lr[1], "api_product_id": lr[2] or "", "has_token": bool((lr[3] or "").strip())}
         except Exception:
             pass
     out = []
@@ -2472,7 +2485,8 @@ def adm_all_pricing():
                     "margin_percent": margin,
                     "product": r[4] or "", "product_name": r[4] or "",
                     "linked": bool(lk), "provider_name": (lk or {}).get("provider_name", ""),
-                    "api_product_id": (lk or {}).get("api_product_id", "")})
+                    "api_product_id": (lk or {}).get("api_product_id", ""),
+                    "token_ok": bool((lk or {}).get("has_token")) if lk else False})
     return jsonify(out)
 
 @app.post("/api/admin/categories/apply-margin")
