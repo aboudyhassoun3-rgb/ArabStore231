@@ -248,7 +248,11 @@
       ];
       if(s.welcome_popup_enabled && s.welcome_popup_text){
         document.getElementById("welcomePopupText").textContent = s.welcome_popup_text;
-        setTimeout(()=>{ document.getElementById("welcomePopup").style.display = "flex"; }, 600);
+        // تظهر مع كل دخول جديد (مرة واحدة لكل جلسة) وليس مع كل تنقل داخلي
+        let already = false;
+        try{ already = !!sessionStorage.getItem("as_welcomed"); sessionStorage.setItem("as_welcomed", "1"); }
+        catch(e){ already = false; }
+        if(!already) setTimeout(()=>{ document.getElementById("welcomePopup").style.display = "flex"; }, 600);
       }
       if(images.length){
         const track = document.getElementById("storeBannerTrack");

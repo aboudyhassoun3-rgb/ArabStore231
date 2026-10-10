@@ -366,7 +366,9 @@ def init_db():
                     "welcome_message": "أهلاً بك في ARAB STORE ✨",
                     "logo_image": "", "dev_logo": "", "app_icon": "", "notif_icon": "",
                     "ai_image_api_url": "", "ai_image_api_key": "",
-                     "ai_image_prompt_template": "luxury dark gaming store artwork for {product} with official brand emblem badge, deep navy background #0b0f19, red neon glow accents #ff1a3c, gold highlights #ffc24b, premium glassmorphism card, cinematic lighting, centered composition, bold uppercase English title text only, absolutely no Arabic text, no watermark",
+                     "ai_image_prompt_template": "Epic luxury dark gaming store hero artwork for {name}, cinematic AAA game key art, dramatic volumetric lighting, deep navy background #0b0f19 with red neon glow accents #ff1a3c and rich gold highlights #ffc24b, premium glassmorphism showcase card in the center, floating golden particles and light streaks, small gold AS store logo badge in the top-left corner, large bold centered uppercase English title \"{name}\", ultra detailed, sharp focus, high contrast, 8k commercial quality, absolutely no Arabic text, no watermark",
+                     "ai_image_prompt_product": "Explosive 3D game top-up product banner for {name}, iconic game elements bursting toward viewer (glowing gems, gold coins, energy crystals, lightning), dramatic rim lighting, deep navy background #0b0f19, red neon glow #ff1a3c, gold highlights #ffc24b, premium glassmorphism pedestal, golden circular emblem badge, floating particles, motion energy trails, giant bold centered uppercase English title \"{name}\", hyper detailed AAA game splash art, 8k, absolutely no Arabic text, no watermark",
+                     "ai_image_prompt_section": "Vast panoramic game store category banner for {name}, epic game universe landscape with glowing showcases and floating game items, atmospheric depth with foreground bokeh, deep navy background #0b0f19, red neon glow #ff1a3c, gold highlights #ffc24b, premium glassmorphism panel, small gold AS store logo badge top-left, large bold centered uppercase English title \"{name}\", cinematic wide composition, ultra detailed, 8k, absolutely no Arabic text, no watermark",
                      "ai_agent_enabled": "false", "ai_agent_name": "مساعد ARAB",
                      "ai_agent_api_url": "", "ai_agent_api_key": "", "ai_agent_model": "",
                      "ai_agent_prompt": "",
@@ -4533,6 +4535,28 @@ def _needs_api_image(image):
     return base.startswith("brand-")
 
 
+def _ai_prompt_for(kind, name):
+    """برومبت التوليد حسب النوع: إعداد المنتجات/الأقسام المخصص أولاً،
+    ثم القالب العام، ثم المولّد الدقيق المدمج. يرجع (prompt, negative)."""
+    try:
+        from branding import to_english, image_prompt_payload
+        name_en = to_english(name or "product")
+        if kind in ("product", "category"):
+            tpl = (get_setting("ai_image_prompt_product", "") or "").strip()
+        elif kind in ("section", "subsection"):
+            tpl = (get_setting("ai_image_prompt_section", "") or "").strip()
+        else:
+            tpl = ""
+        if not tpl:
+            tpl = (get_setting("ai_image_prompt_template", "") or "").strip()
+        neg = image_prompt_payload(kind, name or "product")[1]
+        if tpl:
+            return tpl.replace("{product}", name_en).replace("{name}", name_en), neg
+        return image_prompt_payload(kind, name or "product")
+    except Exception:
+        from branding import image_prompt_payload as _pp
+        return _pp(kind or "product", name or "product")
+
 @app.post("/api/admin/catalog/brand-images/bulk")
 @require_admin
 def adm_brand_images_bulk():
@@ -4574,7 +4598,7 @@ def adm_brand_images_bulk():
     updated, failed = 0, []
     for pid, name, _img in batch:
         try:
-            prompt_en, negative_en = image_prompt_payload("product", name or "product")
+            prompt_en, negative_en = _ai_prompt_for("product", name or "product")
             r = _rq.post(url, json={"prompt": prompt_en, "negative_prompt": negative_en, "key": key}, timeout=20)
             ok, img, err = _extract_ai_image(r)
         except Exception as e:
@@ -4667,11 +4691,8 @@ def ai_gen():
         if custom:
             prompt = custom.replace("{product}", name_en).replace("{name}", name_en)
         else:
-            prompt = (get_setting("ai_image_prompt_template", "") or "").strip()
-            if prompt:
-                prompt = prompt.replace("{product}", name_en).replace("{name}", name_en)
-            else:
-                prompt = prompt_en
+            # برومبت المنتجات/الأقسام المخصص أولاً ثم العام ثم المدمج
+            prompt, negative_en = _ai_prompt_for(kind, name)
         try:
             import requests as _rq
             r = _rq.post(url, json={"prompt": prompt, "negative_prompt": negative_en, "key": key}, timeout=25)
