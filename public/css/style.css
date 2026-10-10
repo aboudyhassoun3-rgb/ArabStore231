@@ -607,6 +607,57 @@ img{ max-width:100%; display:block; }
 .fab-options.open{ opacity:1; visibility:visible; transform:translateY(0); }
 .fab-option{ width:42px; height:42px; border-radius:50%; display:flex; align-items:center; justify-content:center; background:rgba(139,92,246,.9); border:1px solid rgba(255,255,255,.25); }
 .fab-option i{ color:#fff; font-size:18px; }
+/* نبضة على زر المساعد الذكي */
+.fab-main.ai-on{ background:linear-gradient(150deg, #ff2d55, #8b2fc9); box-shadow:0 8px 24px rgba(255,45,85,.5); position:relative; }
+.fab-main.ai-on::after{ content:""; position:absolute; top:2px; left:2px; width:10px; height:10px; border-radius:50%; background:#22e58a; border:2px solid #fff; box-shadow:0 0 8px #22e58a; }
+
+/* =========================================================
+   المساعد الذكي — نافذة المحادثة 🤖
+   ========================================================= */
+.ai-chat{
+  position:fixed; bottom:148px; left:14px; z-index:120;
+  width:min(348px, calc(100vw - 28px)); height:min(480px, calc(100vh - 220px)); min-height:340px;
+  background:var(--surface); border:1px solid var(--border); border-radius:20px;
+  box-shadow:0 20px 60px rgba(0,0,0,.55), 0 0 0 1px rgba(255,45,85,.12), 0 0 32px rgba(139,47,201,.25);
+  display:flex; flex-direction:column; overflow:hidden;
+  opacity:0; visibility:hidden; transform:translateY(18px) scale(.97); transition:.28s cubic-bezier(.2,.8,.3,1.15);
+}
+.ai-chat.open{ opacity:1; visibility:visible; transform:none; }
+.ai-chat-head{
+  display:flex; align-items:center; gap:10px; padding:12px 14px;
+  background:linear-gradient(135deg, #ff2d55, #8b2fc9); color:#fff; flex-shrink:0;
+}
+.ai-chat-head .ai-avatar{
+  width:40px; height:40px; border-radius:50%; background:rgba(255,255,255,.18);
+  border:1.5px solid rgba(255,255,255,.5); display:flex; align-items:center; justify-content:center;
+  font-size:19px; flex-shrink:0;
+}
+.ai-chat-head .ai-name{ font-weight:800; font-size:13px; }
+.ai-chat-head .ai-online{ font-size:10px; opacity:.92; display:flex; align-items:center; gap:5px; }
+.ai-chat-head .ai-online .dot{ width:7px; height:7px; border-radius:50%; background:#22e58a; box-shadow:0 0 6px #22e58a; animation:aiBlink 1.6s infinite; }
+@keyframes aiBlink{ 50%{ opacity:.4; } }
+.ai-chat-head .ai-close{ margin-inline-start:auto; background:rgba(255,255,255,.15); border:none; color:#fff; width:30px; height:30px; border-radius:50%; font-size:13px; cursor:pointer; }
+.ai-chat-body{ flex:1; overflow-y:auto; padding:12px; display:flex; flex-direction:column; gap:9px; background:var(--bg); }
+.ai-msg{ max-width:85%; padding:9px 12px; border-radius:14px; font-size:12.5px; line-height:1.9; word-wrap:break-word; }
+.ai-msg.agent{ background:var(--card); border:1px solid var(--border); color:var(--text); border-start-start-radius:4px; align-self:flex-start; }
+.ai-msg.user{ background:linear-gradient(135deg, var(--accent), var(--accent-dim)); color:#fff; border-start-end-radius:4px; align-self:flex-end; }
+.ai-msg ul{ margin:4px 0; padding-inline-start:18px; }
+.ai-msg li{ margin:2px 0; }
+.ai-msg a{ color:var(--gold); font-weight:700; }
+.ai-msg.user a{ color:#ffe9a8; }
+.ai-typing{ display:flex; gap:5px; padding:12px 14px; background:var(--card); border:1px solid var(--border); border-radius:14px; border-start-start-radius:4px; align-self:flex-start; }
+.ai-typing span{ width:7px; height:7px; border-radius:50%; background:var(--muted); animation:aiTp 1.2s infinite; }
+.ai-typing span:nth-child(2){ animation-delay:.15s; } .ai-typing span:nth-child(3){ animation-delay:.3s; }
+@keyframes aiTp{ 0%,60%,100%{ transform:none; opacity:.5; } 30%{ transform:translateY(-5px); opacity:1; } }
+.ai-chips{ display:flex; gap:7px; padding:9px 12px; overflow-x:auto; flex-shrink:0; background:var(--bg); border-top:1px solid var(--border-soft); }
+.ai-chips::-webkit-scrollbar{ display:none; }
+.ai-chip{ flex-shrink:0; font-size:11px; font-weight:700; padding:7px 12px; border-radius:99px; background:var(--card-soft); border:1px solid var(--border); color:var(--text); cursor:pointer; transition:.15s; }
+.ai-chip:active{ background:var(--accent-soft); border-color:var(--accent); }
+.ai-chat-input{ display:flex; gap:8px; padding:10px 12px; background:var(--surface); border-top:1px solid var(--border); flex-shrink:0; }
+.ai-chat-input input{ flex:1; padding:10px 14px; border-radius:99px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); font-size:12.5px; outline:none; }
+.ai-chat-input input:focus{ border-color:var(--accent); }
+.ai-chat-input button{ width:42px; height:42px; border-radius:50%; border:none; background:linear-gradient(135deg, #ff2d55, #8b2fc9); color:#fff; font-size:15px; cursor:pointer; flex-shrink:0; display:flex; align-items:center; justify-content:center; }
+.ai-chat-input button:disabled{ opacity:.5; }
 
 /* =========================================================
    نماذج / مصادقة (Login & Register)

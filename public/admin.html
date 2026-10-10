@@ -10,7 +10,7 @@
 <meta name="theme-color" content="#e63946">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-<link rel="stylesheet" href="css/style.css?v=24">
+<link rel="stylesheet" href="css/style.css?v=25">
 <style>
   body{ padding-bottom:0; }
   .admin-section{ display:none; }
@@ -68,6 +68,9 @@
     <div class="admin-nav-group">النظام</div>
     <a href="#" class="admin-nav-item" data-section="backup" onclick="goSection('backup', this); return false;"><i class="fa-solid fa-database"></i> النسخ الاحتياطي</a>
     <a href="#" class="admin-nav-item" data-section="logs" onclick="goSection('logs', this); return false;"><i class="fa-solid fa-clipboard-list"></i> سجل الأدمن</a>
+
+    <div class="admin-nav-group">الذكاء الاصطناعي</div>
+    <a href="#" class="admin-nav-item" data-section="ai-agent" onclick="goSection('ai-agent', this); return false;"><i class="fa-solid fa-robot"></i> المساعد الذكي</a>
 
     <div class="drawer-footer" style="margin-top:18px;">
       <a href="/store.html"><i class="fa-solid fa-arrow-right-from-bracket"></i> الرجوع للموقع</a>
@@ -522,11 +525,22 @@
       </div>
 
       <div class="panel">
-        <div class="panel-head"><h3>الرتب الحالية</h3></div>
+        <div class="panel-head"><h3>الرتب الحالية</h3><span class="text-muted" style="font-size:10.5px;">النسبة العامة تُطبق على كل الأقسام ما لم تخصص نسبة لقسم بالأسفل</span></div>
         <div class="table-scroll">
           <table class="data-table">
             <thead><tr><th>الرتبة</th><th>نسبة الخصم</th><th>ترتيب العرض</th><th>إجراء</th></tr></thead>
             <tbody id="tiersTableBody"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h3>🎯 خصم خاص لكل قسم</h3><button class="btn-sm" onclick="loadTierMatrix()"><i class="fa-solid fa-arrows-rotate"></i> تحديث</button></div>
+        <div class="field-hint" style="margin-bottom:10px;">مثال: رتبة <b>تاجر</b> — 5% على قسم الألعاب و2% على قسم الأرقام. الخلية الفارغة تعني <b>الخصم العام</b> للرتبة. يُطبق فوراً عند الشراء (موقع + API + موزعين).</div>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead><tr id="tierMatrixHead"><th>القسم</th></tr></thead>
+            <tbody id="tierMatrixBody"><tr><td>...</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -730,6 +744,31 @@
             <tbody id="logsTableBody"><tr><td colspan="5">...</td></tr></tbody>
           </table>
         </div>
+      </div>
+    </section>
+
+    <!-- ========== المساعد الذكي 🤖 ========== -->
+    <section class="admin-section" id="sec-ai-agent">
+      <div class="panel">
+        <div class="panel-head"><h3><i class="fa-solid fa-robot"></i> إعدادات المساعد الذكي</h3><span class="text-muted" id="aiAgentStatus" style="font-size:11px;">—</span></div>
+        <div class="field-hint" style="margin-bottom:10px;">الوكيل يظهر بزر الدائرة 🤖 أسفل الموقع، يعرف كل منتجاتك وأسعارها ويوجّه المستخدمين. يعمل مع أي API متوافق مع OpenAI (OpenAI نفسها، OpenRouter، أو سيرفر محلي). المفتاح السري يبقى بالسيرفر ولا يظهر أبداً.</div>
+        <div class="admin-fields-grid">
+          <div class="field" style="display:flex; align-items:center; gap:8px; flex-direction:row-reverse; justify-content:flex-end;">
+            <label for="aiEnabled" style="margin:0;">تفعيل المساعد بالموقع</label>
+            <input type="checkbox" id="aiEnabled" style="width:18px; height:18px;">
+          </div>
+          <div class="field"><label>اسم الوكيل (يظهر للمستخدم)</label><input type="text" id="aiName" placeholder="مساعد ARAB" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);"></div>
+          <div class="field"><label>رابط الـ API (ينتهي بـ /chat/completions)</label><input type="text" id="aiUrl" placeholder="https://api.openai.com/v1/chat/completions" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); direction:ltr;"></div>
+          <div class="field"><label>مفتاح الـ API (سري)</label><input type="password" id="aiKey" placeholder="sk-... (اتركه كما هو للإبقاء)" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); direction:ltr;"></div>
+          <div class="field"><label>اسم النموذج (Model)</label><input type="text" id="aiModel" placeholder="gpt-4o-mini" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); direction:ltr;"></div>
+          <div class="field"><label>رسالة الترحيب</label><input type="text" id="aiWelcome" placeholder="أهلاً فيك! اسألني عن أي منتج..." style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);"></div>
+        </div>
+        <div class="field" style="margin-top:10px;"><label>البرومبت المخصص (يُعتمد قبل أي رد — شخصية الوكيل وقوانينه)</label><textarea id="aiPrompt" rows="4" placeholder="مثال: أنت مساعد متجر ARAB STORE، خاطب المستخدم بلهجة سورية ودودة، وابدأ كل رد بإيموجي مناسب..." style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); resize:vertical; width:100%; box-sizing:border-box;"></textarea></div>
+        <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;">
+          <button class="btn btn-primary" style="width:auto; padding:11px 22px;" onclick="saveAiAgent()"><i class="fa-solid fa-floppy-disk"></i> حفظ الإعدادات</button>
+          <button class="btn-sm" onclick="testAiAgent(this)"><i class="fa-solid fa-vial"></i> تجربة الاتصال</button>
+        </div>
+        <div id="aiTestResult" class="field-hint mt-10" style="white-space:pre-line;"></div>
       </div>
     </section>
 
@@ -937,7 +976,7 @@
 </div>
 
 
-<script src="js/app.js?v=6"></script>
+<script src="js/app.js?v=7"></script>
 <script>
   const ADMIN_TOKEN_KEY = "admin_token";
 
@@ -996,6 +1035,6 @@
     }
   });
 </script>
-<script src="js/admin-data.js?v=8"></script>
+<script src="js/admin-data.js?v=9"></script>
 </body>
 </html>

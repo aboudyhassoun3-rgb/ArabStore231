@@ -9,7 +9,7 @@
 <link rel="apple-touch-icon" href="/site-icon">
 <meta name="theme-color" content="#e63946">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-<link rel="stylesheet" href="css/style.css?v=24">
+<link rel="stylesheet" href="css/style.css?v=25">
 </head>
 <body>
 
@@ -69,6 +69,11 @@
   <div id="productNotes" class="notes-box" style="display:none;">
     <i class="fa-solid fa-circle-info"></i>
     <div id="productNotesText"></div>
+  </div>
+
+  <div id="tierDiscountNote" class="notes-box" style="display:none; border-color:var(--gold);">
+    <i class="fa-solid fa-crown" style="color:var(--gold);"></i>
+    <span></span>
   </div>
 
   <div id="purchaseForm" style="display:none;">
@@ -137,7 +142,7 @@
   </div>
 </div>
 
-<script src="js/app.js?v=6"></script>
+<script src="js/app.js?v=7"></script>
 <script>
   const ART_POOL = ["art-red","art-gold","art-purple","art-green","art-blue","art-pink"];
   function getParam(name){ return new URLSearchParams(location.search).get(name); }
@@ -146,6 +151,7 @@
   let packages = [];
   let productImage = "";
   let productEmoji = "";
+  let productSection = "";
   let selected = null;
   let qty = 1;
 
@@ -159,12 +165,24 @@
       const product = await apiFetch("/store/product/" + productId);
       productImage = product.image || "";
       productEmoji = product.emoji || "";
+      productSection = product.category || "";
       document.getElementById("productTitle").textContent = (product.emoji||'') + ' ' + product.name;
       if(product.notes && product.notes.trim()){
         document.getElementById("productNotesText").textContent = product.notes.trim();
         document.getElementById("productNotes").style.display = "flex";
       }
     }catch(err){ /* العنوان الافتراضي يضل كافي */ }
+
+    try{
+      if(Store.token()){
+        const td = await apiFetch("/tier-discounts");
+        const d = productSection && td.discounts ? Number(td.discounts[productSection] || 0) : 0;
+        if(d > 0){
+          const note = document.getElementById("tierDiscountNote");
+          if(note){ note.style.display = "flex"; note.querySelector("span").textContent = `خصم رتبتك (${td.tier_name}) على هذا القسم: ${d}% 🎖️`; }
+        }
+      }
+    }catch(err){ /* الخصم اختياري ولا يكسر الصفحة */ }
 
     try{
       packages = await apiFetch("/store/categories?product_id=" + productId);

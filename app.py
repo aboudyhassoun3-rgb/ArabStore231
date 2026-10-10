@@ -292,6 +292,7 @@ CREATE TABLE IF NOT EXISTS banners(id INTEGER PRIMARY KEY AUTOINCREMENT, image T
 CREATE TABLE IF NOT EXISTS web_admins(email TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS tiers(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, percent REAL DEFAULT 0, min_spent REAL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS user_tier(user_id INTEGER PRIMARY KEY, tier_id INTEGER);
+CREATE TABLE IF NOT EXISTS tier_section_discounts(tier_id INTEGER, section TEXT, percent REAL DEFAULT 0, PRIMARY KEY(tier_id, section));
 CREATE TABLE IF NOT EXISTS referrals(code TEXT PRIMARY KEY, owner_id INTEGER, uses INTEGER DEFAULT 0);
 """
 
@@ -346,6 +347,7 @@ def init_db():
                     "ALTER TABLE web_admins ADD COLUMN added_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP",
                     "ALTER TABLE products ADD COLUMN notes TEXT DEFAULT ''",
                     "ALTER TABLE orders ADD COLUMN provider_id INTEGER DEFAULT NULL",
+                    "CREATE TABLE IF NOT EXISTS tier_section_discounts(tier_id INTEGER, section TEXT, percent REAL DEFAULT 0, PRIMARY KEY(tier_id, section))",
                     "ALTER TABLE providers ADD COLUMN order_path TEXT DEFAULT ''",
                     "ALTER TABLE providers ADD COLUMN status_path TEXT DEFAULT ''",
                     "ALTER TABLE providers ADD COLUMN catalog_path TEXT DEFAULT ''",
@@ -362,8 +364,12 @@ def init_db():
                     "welcome_message": "أهلاً بك في ARAB STORE ✨",
                     "logo_image": "", "dev_logo": "", "app_icon": "", "notif_icon": "",
                     "ai_image_api_url": "", "ai_image_api_key": "",
-                    "ai_image_prompt_template": "luxury dark gaming store artwork for {product} with official brand emblem badge, deep navy background #0b0f19, red neon glow accents #ff1a3c, gold highlights #ffc24b, premium glassmorphism card, cinematic lighting, centered composition, bold uppercase English title text only, absolutely no Arabic text, no watermark",
-                    "maintenance_enabled": "false", "maintenance_ends_at": ""}
+                     "ai_image_prompt_template": "luxury dark gaming store artwork for {product} with official brand emblem badge, deep navy background #0b0f19, red neon glow accents #ff1a3c, gold highlights #ffc24b, premium glassmorphism card, cinematic lighting, centered composition, bold uppercase English title text only, absolutely no Arabic text, no watermark",
+                     "ai_agent_enabled": "false", "ai_agent_name": "مساعد ARAB",
+                     "ai_agent_api_url": "", "ai_agent_api_key": "", "ai_agent_model": "",
+                     "ai_agent_prompt": "",
+                     "ai_agent_welcome": "أهلاً فيك! أنا مساعد المتجر 🤖 اسألني عن أي منتج أو سعر أو طريقة شحن.",
+                     "maintenance_enabled": "false", "maintenance_ends_at": ""}
         for k, v in defaults.items():
             try: db.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING" if USE_PG
                             else "INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)", (k, v))
@@ -474,6 +480,44 @@ def tier_of(uid):
     with get_db() as db:
         r = db.execute("SELECT t.name,t.percent FROM user_tier ut JOIN tiers t ON t.id=ut.tier_id WHERE ut.user_id=?", (uid,)).fetchone()
         return (r[0], float(r[1])) if r else None
+
+def tier_section_discount(uid, section=""):
+    """خصم رتبة المستخدم على قسم معيّن: المصفوفة أولاً، وإلا النسبة العامة للرتبة.
+    يرجع (tier_name, percent)."""
+    with get_db() as db:
+        t = db.execute("SELECT t.id,t.name,t.percent FROM user_tier ut JOIN tiers t ON t.id=ut.tier_id WHERE ut.user_id=?", (uid,)).fetchone()
+        if not t:
+            return ("", 0)
+        tid, tname, tglobal = t[0], t[1], float(t[2] or 0)
+        if section:
+            try:
+                r = db.execute("SELECT percent FROM tier_section_discounts WHERE tier_id=? AND section=?", (tid, section)).fetchone()
+                if r and r[0] is not None:
+                    return (tname, float(r[0]))
+            except Exception:
+                pass
+        return (tname, tglobal)
+
+def user_section_discounts(uid):
+    """كل خصومات أقسام المستخدم: {section: percent} (بعد دمج العام مع المصفوفة)."""
+    out = {}
+    try:
+        with get_db() as db:
+            t = db.execute("SELECT t.id,t.percent FROM user_tier ut JOIN tiers t ON t.id=ut.tier_id WHERE ut.user_id=?", (uid,)).fetchone()
+            if not t:
+                return out
+            base = float(t[1] or 0)
+            secs = db.execute("SELECT name FROM sections WHERE is_active=1 ORDER BY sort_order,id").fetchall()
+            try:
+                rows = db.execute("SELECT section,percent FROM tier_section_discounts WHERE tier_id=?", (t[0],)).fetchall()
+                over = {r[0]: float(r[1]) for r in rows}
+            except Exception:
+                over = {}
+            for s in secs:
+                out[s[0]] = over.get(s[0], base)
+    except Exception:
+        pass
+    return out
 
 def is_admin(email):
     e = (email or "").lower()
@@ -1372,9 +1416,10 @@ def order_create():
         if not s: return jsonify({"message": "الباقة غير موجودة"}), 404
         if s[5] and not player: return jsonify({"message": "أدخل معرّف اللاعب"}), 400
         if s[4] is not None and int(s[4]) <= 0: return jsonify({"message": "نفد المخزون حالياً"}), 400
-        p = db.execute("SELECT name FROM products WHERE id=?", (s[1],)).fetchone()
+        p = db.execute("SELECT name,category FROM products WHERE id=?", (s[1],)).fetchone()
         pname = p[0] if p else ""
-        t = tier_of(uid); disc = t[1] if t else 0
+        pcat = (p[1] if p and len(p) > 1 else "") or ""
+        t = tier_section_discount(uid, pcat); disc = t[1] if t else 0
         price_usd = round(float(s[3]) * (1 - disc / 100), 4); r = rate(); price_syp = int(price_usd * r * qty)
         bal = balance_of(uid)
         if bal < price_syp: return jsonify({"message": f"رصيدك غير كافٍ ({bal:,} ل.س). اشحن محفظتك أولاً 💳"}), 402
@@ -1592,7 +1637,14 @@ def v1_order():
         try: s = db.execute("SELECT id,product_id,name,price,cost FROM skus WHERE id=?", (sku_id,)).fetchone()
         except Exception: s = db.execute("SELECT id,product_id,name,price FROM skus WHERE id=?", (sku_id,)).fetchone()
         if not s: return jsonify({"message": "sku غير موجود"}), 404
-        cost = float(s[3]) * qty; bal = balance_of(uid)
+        pcat = ""
+        try:
+            _pr = db.execute("SELECT category FROM products WHERE id=?", (s[1],)).fetchone()
+            pcat = (_pr[0] if _pr else "") or ""
+        except Exception:
+            pass
+        _t = tier_section_discount(uid, pcat); cost = round(float(s[3]) * (1 - _t[1] / 100), 4) * qty
+        bal = balance_of(uid)
         if bal < int(cost * rate()): return jsonify({"message": "رصيد غير كافٍ"}), 402
         _ptok, _purl, _ppid, _pvid, _popath, _pspath, _linked = sku_provider(s[0])
         if _linked and not (_ptok or "").strip():
@@ -2357,7 +2409,66 @@ def adm_tier_ed(tid):
 def adm_tier_del(tid):
     with get_db() as db:
         db.execute("DELETE FROM user_tier WHERE tier_id=?", (tid,)); db.execute("DELETE FROM tiers WHERE id=?", (tid,))
+        try: db.execute("DELETE FROM tier_section_discounts WHERE tier_id=?", (tid,))
+        except Exception: pass
+    alog("🗑️ حذف رتبة", f"#{tid}")
     return jsonify({"message": "تم الحذف"})
+
+@app.get("/api/admin/tier-section-discounts")
+@require_admin
+def adm_tsec_list():
+    """مصفوفة خصومات الرتب لكل قسم: {tiers, sections, matrix}."""
+    with get_db() as db:
+        try: tiers = db.execute("SELECT id,name,percent FROM tiers ORDER BY sort_order,percent").fetchall()
+        except Exception: tiers = db.execute("SELECT id,name,percent FROM tiers ORDER BY percent").fetchall()
+        try: secs = db.execute("SELECT name FROM sections WHERE is_active=1 ORDER BY sort_order,id").fetchall()
+        except Exception: secs = []
+        try: rows = db.execute("SELECT tier_id,section,percent FROM tier_section_discounts").fetchall()
+        except Exception: rows = []
+    matrix = {}
+    for r in rows:
+        matrix.setdefault(r[0], {})[r[1]] = float(r[2])
+    return jsonify({"tiers": [{"id": t[0], "name": t[1], "percent": float(t[2] or 0)} for t in tiers],
+                    "sections": [s[0] for s in secs], "matrix": matrix})
+
+@app.post("/api/admin/tier-section-discounts")
+@require_admin
+def adm_tsec_set():
+    """ضبط خصم رتبة على قسم: {tier_id, section, percent} — فارغ/0 يحذف التخصيص (يرجع للعام)."""
+    b = request.get_json(force=True, silent=True) or {}
+    try: tid = int(b.get("tier_id") or 0)
+    except (TypeError, ValueError): tid = 0
+    sec = (b.get("section") or "").strip()
+    raw = b.get("percent")
+    if not tid or not sec:
+        return jsonify({"message": "اختر الرتبة والقسم"}), 400
+    with get_db() as db:
+        if not db.execute("SELECT 1 FROM tiers WHERE id=?", (tid,)).fetchone():
+            return jsonify({"message": "الرتبة غير موجودة"}), 404
+        if raw in (None, ""):
+            try: db.execute("DELETE FROM tier_section_discounts WHERE tier_id=? AND section=?", (tid, sec))
+            except Exception: pass
+            return jsonify({"message": "تمت الإزالة — صار يطبق الخصم العام ✅"})
+        try: pct = float(raw)
+        except (TypeError, ValueError):
+            return jsonify({"message": "نسبة غير صالحة"}), 400
+        if pct < 0 or pct > 100:
+            return jsonify({"message": "النسبة بين 0 و 100"}), 400
+        try:
+            if USE_PG: db.execute("INSERT INTO tier_section_discounts(tier_id,section,percent) VALUES(?,?,?) ON CONFLICT(tier_id,section) DO UPDATE SET percent=excluded.percent", (tid, sec, pct))
+            else: db.execute("INSERT OR REPLACE INTO tier_section_discounts(tier_id,section,percent) VALUES(?,?,?)", (tid, sec, pct))
+        except Exception as e:
+            return jsonify({"message": f"تعذّر الحفظ: {e}"}), 500
+    alog("🎖️ خصم قسم لرتبة", sec, f"tier={tid} — {pct}%")
+    return jsonify({"message": f"تم ✅ خصم {pct}% على قسم {sec}"})
+
+@app.get("/api/tier-discounts")
+@require_auth
+def my_tier_discounts():
+    """خصومات أقسام المستخدم الحالي (لإظهارها بصفحة المنتج)."""
+    uid = int(request.wu["site_user_id"] if "site_user_id" in request.wu.keys() else request.wu[4])
+    t = tier_of(uid)
+    return jsonify({"tier_name": t[0] if t else "", "discounts": user_section_discounts(uid)})
 
 @app.post("/api/admin/users/<int:wid>/tier")
 @require_admin
@@ -2598,6 +2709,7 @@ def ensure_extra():
                     "ALTER TABLE providers ADD COLUMN balance_path TEXT DEFAULT ''",
                     "ALTER TABLE providers ADD COLUMN balance_cache TEXT DEFAULT ''",
                     "ALTER TABLE providers ADD COLUMN balance_at TEXT DEFAULT ''",
+                    "CREATE TABLE IF NOT EXISTS tier_section_discounts(tier_id INTEGER, section TEXT, percent REAL DEFAULT 0, PRIMARY KEY(tier_id, section))",
                     "CREATE TABLE IF NOT EXISTS admin_logs(id INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT DEFAULT '', action TEXT DEFAULT '', target TEXT DEFAULT '', detail TEXT DEFAULT '', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
                     "UPDATE orders SET order_uuid=('TRK-'||id) WHERE order_uuid IS NULL OR order_uuid=''"])
         # الفهارس هنا بعد اكتمال كل الجداول (بما فيها auth_tokens وcategory_links).
@@ -2670,6 +2782,176 @@ def admin_auto():
     email = request.wu["email"] if "email" in request.wu.keys() else request.wu[2]
     if not is_admin(email): return jsonify({"message": "غير مصرح"}), 403
     return jsonify({"token": issue_token(None, admin=True, owner=(email or "").lower() in OWNER_EMAILS), "owner": (email or "").lower() in OWNER_EMAILS})
+
+# ================= وكيل AI لمساعدة المستخدمين =================
+_AI_CTX_CACHE = {"at": 0, "text": ""}
+
+def _ai_store_context():
+    """ملخص المتجر للوكيل: الأقسام + المنتجات والباقات (سعر/توفر) + الدعم — كاش 60 ثانية."""
+    now = time.time()
+    if now - _AI_CTX_CACHE["at"] < 60 and _AI_CTX_CACHE["text"]:
+        return _AI_CTX_CACHE["text"]
+    try:
+        store = get_setting("store_name", "ARAB STORE")
+        r = rate()
+        tg = get_setting("support_telegram", "https://t.me/aboudy2312")
+        wa = get_setting("support_whatsapp", "")
+        wa_url = get_setting("support_whatsapp_url", "") or (f"https://wa.me/{re.sub(r'[^\d]', '', wa)}" if wa else "")
+        lines = [f"المتجر: {store}", f"سعر الصرف: 1$ = {r:,.0f} ل.س",
+                 f"الدعم تيليجرام: {tg}" + (f" | واتساب: {wa_url}" if wa_url else "")]
+        with get_db() as db:
+            try: secs = db.execute("SELECT name FROM sections WHERE is_active=1 ORDER BY sort_order,id").fetchall()
+            except Exception: secs = []
+            try:
+                man = db.execute("SELECT title FROM deposit_manual").fetchall()
+                auto = db.execute("SELECT title FROM deposit_auto").fetchall()
+                if man or auto:
+                    lines.append("طرق شحن الرصيد: " + "، ".join([m[0] for m in man] + [a[0] for a in auto]))
+            except Exception:
+                pass
+            prods = db.execute("SELECT id,name,category FROM products ORDER BY category,id").fetchall()
+            for p in prods:
+                try: skus = db.execute("SELECT name,price,stock_qty,requires_id FROM skus WHERE product_id=?", (p[0],)).fetchall()
+                except Exception: skus = []
+                if not skus:
+                    continue
+                parts = []
+                for s in skus:
+                    avail = "متوفر ✅" if (s[2] is None or int(s[2]) > 0) else "نافد ❌"
+                    parts.append(f"{s[0]}: ${float(s[1] or 0):.2f} ({avail})")
+                lines.append(f"[{p[2] or 'عام'}] {p[1]} (id:{p[0]}): " + " | ".join(parts))
+        text = "\n".join(lines)
+        if len(text) > 7000:
+            text = text[:7000] + "\n...(يوجد منتجات أكثر — وجّه المستخدم للبحث بالمتجر)"
+        _AI_CTX_CACHE.update({"at": now, "text": text})
+        return text
+    except Exception:
+        return ""
+
+def _ai_system_prompt():
+    custom = (get_setting("ai_agent_prompt", "") or "").strip()
+    name = get_setting("ai_agent_name", "مساعد ARAB") or "مساعد ARAB"
+    ctx = _ai_store_context()
+    base = (f"أنت {name}، مساعد متجر عربي ذكي ودود ومختصر.\n"
+            "قواعد صارمة:\n"
+            "1) أجب بالعربية دائماً وبتنسيق جميل: **عناوين عريضة** وقوائم بنقاط (-).\n"
+            "2) عند السؤال عن منتج: قل **موجود ✅** مع سعره وقسمه، أو **غير موجود ❌** واقترح البديل الأقرب من القائمة.\n"
+            "3) لا تخترع منتجات أو أسعاراً — اعتمد قائمة المتجر أدناه فقط.\n"
+            "4) لتتبع طلب: وجّه المستخدم لصفحة طلباتي.\n"
+            "5) لشحن الرصيد: اذكر طرق الشحن المتاحة.\n"
+            "6) إن احتاج المستخدم الإدارة (مشكلة دفع، طلب عالق، استفسار خاص): أعطه رقم/رابط الدعم.\n"
+            "7) روابط المنتجات بهذا الشكل: /product.html?id=رقم_المنتج.\n"
+            "8) إجابات قصيرة مركزة (5 أسطر كحد أقصى عادة).\n")
+    if custom:
+        base = f"تعليمات الإدارة (أولوية قصوى):\n{custom}\n\n" + base
+    return base + "\n=== بيانات المتجر الحية ===\n" + ctx
+
+def _ai_call_llm(messages):
+    """يستدعي API النموذج (متوافق مع OpenAI) ويرجع نص الرد."""
+    url = (get_setting("ai_agent_api_url", "") or "").strip().rstrip("/")
+    key = (get_setting("ai_agent_api_key", "") or "").strip()
+    model = (get_setting("ai_agent_model", "") or "").strip()
+    if not url or not model:
+        raise ValueError("not-configured")
+    import requests as _rq
+    headers = {"Content-Type": "application/json"}
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
+    r = _rq.post(url, headers=headers, json={"model": model, "messages": messages,
+                 "temperature": 0.4, "max_tokens": 800}, timeout=30)
+    if not r.ok:
+        raise ValueError(f"http-{r.status_code}")
+    try:
+        d = r.json()
+        return (d["choices"][0]["message"]["content"] or "").strip()
+    except Exception:
+        raise ValueError("bad-response")
+
+@app.get("/api/ai-agent/config")
+def ai_agent_config():
+    """إعدادات عامة للواجهة (بدون المفتاح السري أبداً)."""
+    return jsonify({"enabled": get_setting("ai_agent_enabled", "false") == "true",
+                    "name": get_setting("ai_agent_name", "مساعد ARAB") or "مساعد ARAB",
+                    "welcome": get_setting("ai_agent_welcome", "") or ""})
+
+@app.post("/api/ai-agent/chat")
+@limiter.limit("5 per minute")
+@limiter.limit("40 per hour")
+def ai_agent_chat():
+    if get_setting("ai_agent_enabled", "false") != "true":
+        return jsonify({"message": "المساعد الذكي غير مفعّل حالياً — تواصل مع الإدارة مباشرة"}), 503
+    b = request.get_json(force=True, silent=True) or {}
+    msg = (b.get("message") or "").strip()[:1000]
+    if len(msg) < 2:
+        return jsonify({"message": "اكتب سؤالك أولاً"}), 400
+    hist = b.get("history") or []
+    msgs = [{"role": "system", "content": _ai_system_prompt()}]
+    for h in hist[-8:]:
+        try:
+            role = "assistant" if str(h.get("role")) == "assistant" else "user"
+            content = str(h.get("content") or "")[:800]
+            if content:
+                msgs.append({"role": role, "content": content})
+        except Exception:
+            pass
+    # تخصيص بسيط: اسم المستخدم ورتبته إن كان مسجلاً
+    try:
+        u = optional_user()
+        if u is not None:
+            nm = u["name"] if "name" in u.keys() else u[1]
+            uid = int(u["site_user_id"] if "site_user_id" in u.keys() else u[4])
+            t = tier_of(uid)
+            msgs.append({"role": "system", "content": f"المستخدم الحالي: {nm}" + (f" (رتبة: {t[0]} — خصم {t[1]}%)" if t else " (بدون رتبة)")})
+    except Exception:
+        pass
+    msgs.append({"role": "user", "content": msg})
+    try:
+        reply = _ai_call_llm(msgs)
+    except ValueError as e:
+        code = str(e)
+        tg = get_setting("support_telegram", "https://t.me/aboudy2312")
+        if code == "not-configured":
+            return jsonify({"reply": f"عذراً، المساعد قيد الإعداد حالياً 🛠️ تواصل مع الإدارة مباشرة: {tg}"})
+        return jsonify({"reply": f"عذراً، تعذّر الرد حالياً ⏳ حاول مجدداً أو تواصل مع الإدارة: {tg}"})
+    if not reply:
+        reply = "لم أفهم سؤالك تماماً — جرّب تسألني عن منتج أو سعر أو طريقة شحن 🤖"
+    return jsonify({"reply": reply})
+
+@app.get("/api/admin/ai-agent")
+@require_admin
+def adm_ai_get():
+    with get_db() as db:
+        rows = db.execute("SELECT key,value FROM settings WHERE key LIKE 'ai_agent_%'").fetchall()
+    d = {r[0]: r[1] for r in rows}
+    d["ai_agent_api_key"] = "••••••" if (d.get("ai_agent_api_key") or "").strip() else ""
+    return jsonify(d)
+
+@app.post("/api/admin/ai-agent")
+@require_admin
+def adm_ai_save():
+    b = request.get_json(force=True, silent=True) or {}
+    allowed = ("ai_agent_enabled", "ai_agent_name", "ai_agent_api_url", "ai_agent_model",
+               "ai_agent_prompt", "ai_agent_welcome")
+    for k in allowed:
+        if k in b:
+            set_setting(k, str(b[k] if b[k] is not None else ""))
+    # المفتاح السري: لا يُستبدل بقيمة القناع المعروضة
+    if "ai_agent_api_key" in b and (b.get("ai_agent_api_key") or "").strip() not in ("", "••••••"):
+        set_setting("ai_agent_api_key", str(b["ai_agent_api_key"]).strip())
+    _AI_CTX_CACHE.update({"at": 0, "text": ""})
+    alog("🤖 ضبط المساعد الذكي", "", f"enabled={b.get('ai_agent_enabled')}")
+    return jsonify({"message": "تم حفظ إعدادات المساعد ✅"})
+
+@app.post("/api/admin/ai-agent/test")
+@require_admin
+def adm_ai_test():
+    """تجربة فورية: يرسل 'مرحباً' للنموذج ويرجع رده للتأكد من عمل الربط."""
+    try:
+        reply = _ai_call_llm([{"role": "system", "content": _ai_system_prompt()},
+                              {"role": "user", "content": "مرحباً، عرّف بنفسك بجملة واحدة"}])
+    except ValueError as e:
+        return jsonify({"message": f"فشل الاتصال ({e}) — تحقق من الرابط والمفتاح واسم النموذج"}), 502
+    return jsonify({"message": "الاتصال يعمل ✅", "reply": reply or "…"})
 
 # --- إشعارات الأدمن + push ---
 def _vapid_keys():
@@ -3043,9 +3325,16 @@ def _client_place(pid):
         if qty < (s[6] or 1): return jsonify({"status": "error", "code": 112, "message": "الكمية صغيرة جداً"}), 400
         if qty > (s[7] or 1): return jsonify({"status": "error", "code": 113, "message": "الكمية كبيرة جداً"}), 400
         if s[5] and not player: return jsonify({"status": "error", "code": 114, "message": "playerId مطلوب"}), 400
-        cost = float(s[3] or 0) * qty
-        if balance_of(uid) < int(cost * rate()): return jsonify({"status": "error", "code": 100, "message": "رصيد غير كافٍ"}), 400
         p = db.execute("SELECT name FROM products WHERE id=?", (s[1],)).fetchone()
+        pcat = ""
+        try:
+            _pr = db.execute("SELECT category FROM products WHERE id=?", (s[1],)).fetchone()
+            pcat = (_pr[0] if _pr else "") or ""
+        except Exception:
+            pass
+        _t = tier_section_discount(uid, pcat)
+        cost = round(float(s[3] or 0) * (1 - _t[1] / 100), 4) * qty
+        if balance_of(uid) < int(cost * rate()): return jsonify({"status": "error", "code": 100, "message": "رصيد غير كافٍ"}), 400
         _ptok, _purl, _ppid, _pvid, _popath, _pspath, _linked = sku_provider(s[0])
         if _linked and not (_ptok or "").strip():
             return jsonify({"status": "error", "code": 121, "message": "المنتج مربوط بمزوّد لكن التوكن فارغ"}), 400

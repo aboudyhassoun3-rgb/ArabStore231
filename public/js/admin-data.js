@@ -8,6 +8,7 @@ const SECTION_TITLES = {
   dashboard:"الرئيسية", orders:"الطلبات", deposits:"الإيداعات",
   users:"المستخدمون", "discount-tiers":"المستويات", products:"المنتجات",
   "smart-admin":"الإدارة الذكية", backup:"النسخ الاحتياطي", logs:"سجل الأدمن",
+  "ai-agent":"المساعد الذكي",
 };
 
 const SECTION_LOADERS = {
@@ -16,11 +17,12 @@ const SECTION_LOADERS = {
   orders: ()=>Promise.all([loadOrders("all"), loadShopOrders()]),
   deposits: ()=>Promise.all([loadDeposits(), loadDepositMethods()]),
   users: loadUsers,
-  "discount-tiers": loadDiscountTiers,
+  "discount-tiers": ()=>Promise.all([loadDiscountTiers(), loadTierMatrix()]),
   products: ()=>Promise.all([loadProducts(), loadSections()]),
   "smart-admin": ()=>Promise.all([loadProviders(), loadPricing()]),
   backup: ()=>Promise.all([loadBackups(), loadSnaps()]),
   logs: loadAdminLogs,
+  "ai-agent": loadAiAgent,
 };
 async function changeAdminPassword(){
   const cur = document.getElementById("admCurPw").value, nw = document.getElementById("admNewPw").value;
@@ -518,6 +520,55 @@ async function sendPushBroadcast(btn){
   finally{ if(btn){ btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-tower-broadcast"></i> بث الآن'; } }
 }
 
+/* ===== المساعد الذكي 🤖 ===== */
+async function loadAiAgent(){
+  try{
+    const s = await adminFetch("/admin/ai-agent");
+    document.getElementById("aiEnabled").checked = (s.ai_agent_enabled === "true");
+    document.getElementById("aiName").value = s.ai_agent_name || "";
+    document.getElementById("aiUrl").value = s.ai_agent_api_url || "";
+    document.getElementById("aiKey").value = "";
+    document.getElementById("aiKey").placeholder = s.ai_agent_api_key ? "تم الحفظ مسبقاً •••••• (اتركه للإبقاء)" : "sk-...";
+    document.getElementById("aiModel").value = s.ai_agent_model || "";
+    document.getElementById("aiPrompt").value = s.ai_agent_prompt || "";
+    document.getElementById("aiWelcome").value = s.ai_agent_welcome || "";
+    const ok = (s.ai_agent_enabled === "true") && s.ai_agent_api_url && s.ai_agent_model;
+    document.getElementById("aiAgentStatus").textContent = ok ? "🟢 مفعّل وجاهز" : "⚪ غير مفعّل أو ناقص الإعداد";
+  }catch(err){ toast(err.message, "error"); }
+}
+async function saveAiAgent(){
+  const body = {
+    ai_agent_enabled: document.getElementById("aiEnabled").checked ? "true" : "false",
+    ai_agent_name: document.getElementById("aiName").value.trim(),
+    ai_agent_api_url: document.getElementById("aiUrl").value.trim(),
+    ai_agent_model: document.getElementById("aiModel").value.trim(),
+    ai_agent_prompt: document.getElementById("aiPrompt").value,
+    ai_agent_welcome: document.getElementById("aiWelcome").value.trim(),
+  };
+  const key = document.getElementById("aiKey").value.trim();
+  if(key) body.ai_agent_api_key = key;
+  if(body.ai_agent_enabled === "true" && (!body.ai_agent_api_url || !body.ai_agent_model)){
+    toast("أدخل رابط الـ API واسم النموذج قبل التفعيل", "error"); return;
+  }
+  try{
+    const r = await adminFetch("/admin/ai-agent", { method:"POST", body: JSON.stringify(body) });
+    toast(r.message);
+    document.getElementById("aiKey").value = "";
+    loadAiAgent();
+  }catch(err){ toast(err.message, "error"); }
+}
+async function testAiAgent(btn){
+  const box = document.getElementById("aiTestResult");
+  box.textContent = "جارِ تجربة الاتصال... ⏳";
+  if(btn){ btn.disabled = true; }
+  try{
+    const r = await adminFetch("/admin/ai-agent/test", { method:"POST" });
+    box.textContent = r.message + "\n\nرد النموذج:\n" + (r.reply || "…");
+    toast(r.message);
+  }catch(err){ box.textContent = err.message; toast(err.message, "error"); }
+  finally{ if(btn) btn.disabled = false; }
+}
+
 /* ===== البحث الشامل (طلب / مستخدم / إيداع) ===== */
 let _globalSearchTimer = null;
 async function adminGlobalSearch(q){
@@ -819,8 +870,41 @@ async function updateDiscountTier(tierId, changes){
 }
 async function deleteDiscountTier(tierId){
   if(!confirm("حذف هذه الرتبة؟ كل المستخدمين المعيّنين لها سيرجعون لحالة بدون رتبة (0% خصم).")) return;
-  try{ await adminFetch(`/admin/discount-tiers/${tierId}`, { method:"DELETE" }); toast("تم الحذف"); loadDiscountTiers(); }
+  try{ await adminFetch(`/admin/discount-tiers/${tierId}`, { method:"DELETE" }); toast("تم الحذف"); loadDiscountTiers(); loadTierMatrix(); }
   catch(err){ toast(err.message, "error"); }
+}
+/* ===== مصفوفة خصم كل رتبة على كل قسم ===== */
+async function loadTierMatrix(){
+  const head = document.getElementById("tierMatrixHead");
+  const body = document.getElementById("tierMatrixBody");
+  if(!head || !body) return;
+  try{
+    const d = await adminFetch("/admin/tier-section-discounts");
+    const tiers = d.tiers || [], sections = d.sections || [], matrix = d.matrix || {};
+    if(!tiers.length || !sections.length){
+      head.innerHTML = "<th>القسم</th>";
+      body.innerHTML = `<tr><td class="text-muted" style="text-align:center; padding:14px;">أضف رتبة وأقساماً أولاً لتظهر المصفوفة هنا</td></tr>`;
+      return;
+    }
+    head.innerHTML = "<th>القسم \\ الرتبة</th>" + tiers.map(t=>`<th>${t.name}<br><small style="color:var(--muted);">عام ${t.percent}%</small></th>`).join("");
+    body.innerHTML = sections.map(sec=>{
+      const cells = tiers.map(t=>{
+        const v = (matrix[t.id] && matrix[t.id][sec] !== undefined) ? matrix[t.id][sec] : "";
+        return `<td><input type="number" min="0" max="100" step="0.5" placeholder="${t.percent}" value="${v}"
+          onchange="saveTierSection(${t.id}, '${sec.replace(/'/g,"")}', this.value)"
+          style="padding:6px 8px; border-radius:8px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); font-size:11px; width:70px;" title="فارغ = الخصم العام (${t.percent}%)"> <small>%</small></td>`;
+      }).join("");
+      return `<tr><td><b>${sec}</b></td>${cells}</tr>`;
+    }).join("");
+  }catch(err){
+    body.innerHTML = `<tr><td class="text-muted" style="text-align:center; padding:14px;">${err.message}</td></tr>`;
+  }
+}
+async function saveTierSection(tierId, section, value){
+  try{
+    const r = await adminFetch("/admin/tier-section-discounts", { method:"POST", body: JSON.stringify({ tier_id: tierId, section, percent: (value === "" ? null : Number(value)) }) });
+    toast(r.message);
+  }catch(err){ toast(err.message, "error"); loadTierMatrix(); }
 }
 async function blockUser(webId){
   try{ await adminFetch(`/admin/users/${webId}/block`, { method:"POST" }); toast("تم حظر المستخدم"); loadUsers(); }

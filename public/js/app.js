@@ -170,10 +170,144 @@ function setupFab(){
   const fab = document.getElementById("fabMainBtn");
   const opts = document.getElementById("fabOptions");
   if(!fab || !opts) return;
-  fab.addEventListener("click", (e)=>{ e.stopPropagation(); opts.classList.toggle("open"); });
+  // الوضع الافتراضي: قائمة الدعم القديمة — تُستبدل بالمساعد الذكي إن كان مفعّلاً
+  fab.addEventListener("click", (e)=>{
+    e.stopPropagation();
+    if(AI_AGENT.enabled){ toggleAiChat(); return; }
+    opts.classList.toggle("open");
+  });
   document.addEventListener("click", (e)=>{
     if(!e.target.closest(".fab-stack")) opts.classList.remove("open");
   });
+  initAiAgent(fab);
+}
+
+/* ===== المساعد الذكي 🤖 — يعرف المتجر كاملاً ويوجّه المستخدمين ===== */
+const AI_AGENT = { enabled:false, name:"مساعد ARAB", welcome:"", loaded:false };
+const AI_CHIPS = ["🔍 ابحث عن منتج", "💎 أسعار الشحن", "💳 كيف أشحن رصيدي؟", "📦 تتبع طلبي", "📞 التواصل مع الإدارة"];
+
+async function initAiAgent(fab){
+  try{
+    const r = await fetch(API_BASE + "/ai-agent/config");
+    const cfg = await r.json();
+    AI_AGENT.enabled = !!cfg.enabled;
+    AI_AGENT.name = cfg.name || "مساعد ARAB";
+    AI_AGENT.welcome = cfg.welcome || "أهلاً فيك! أنا مساعد المتجر 🤖 اسألني عن أي منتج أو سعر أو طريقة شحن.";
+  }catch(e){ return; }
+  AI_AGENT.loaded = true;
+  if(!AI_AGENT.enabled || !fab) return;
+  fab.classList.add("ai-on");
+  const icon = fab.querySelector("i");
+  if(icon) icon.className = "fa-solid fa-robot";
+  fab.title = AI_AGENT.name;
+  buildAiChatPanel();
+}
+
+function buildAiChatPanel(){
+  if(document.getElementById("aiChatPanel")) return;
+  const panel = document.createElement("div");
+  panel.id = "aiChatPanel";
+  panel.className = "ai-chat";
+  panel.innerHTML = `
+    <div class="ai-chat-head">
+      <div class="ai-avatar"><i class="fa-solid fa-robot"></i></div>
+      <div><div class="ai-name">${AI_AGENT.name}</div><div class="ai-online"><span class="dot"></span> متصل الآن — يرد فوراً</div></div>
+      <button class="ai-close" onclick="toggleAiChat(false)" title="إغلاق"><i class="fa-solid fa-xmark"></i></button>
+    </div>
+    <div class="ai-chat-body" id="aiChatBody"></div>
+    <div class="ai-chips">${AI_CHIPS.map(c=>`<button class="ai-chip" onclick="aiChipAsk(this)">${c}</button>`).join("")}</div>
+    <div class="ai-chat-input">
+      <input type="text" id="aiChatInput" placeholder="اكتب سؤالك..." maxlength="1000" onkeydown="if(event.key==='Enter') aiSend();">
+      <button id="aiChatSend" onclick="aiSend()" title="إرسال"><i class="fa-solid fa-paper-plane"></i></button>
+    </div>`;
+  document.body.appendChild(panel);
+  renderAiHistory();
+}
+
+function toggleAiChat(force){
+  const panel = document.getElementById("aiChatPanel");
+  if(!panel) return;
+  const open = force !== undefined ? force : !panel.classList.contains("open");
+  panel.classList.toggle("open", open);
+  if(open){
+    const body = document.getElementById("aiChatBody");
+    if(!aiGetHistory().length) aiPushMsg("assistant", AI_AGENT.welcome);
+    renderAiHistory();
+    body.scrollTop = body.scrollHeight;
+    setTimeout(()=> document.getElementById("aiChatInput")?.focus(), 250);
+  }
+}
+
+/* تنسيق جميل: عريض + قوائم + روابط + أسطر */
+function aiRender(text){
+  let h = String(text || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  h = h.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+  const lines = h.split("\n");
+  let out = "", inList = false;
+  for(const ln of lines){
+    const t = ln.trim();
+    if(/^([-*•]\s+)/.test(t)){
+      if(!inList){ out += "<ul>"; inList = true; }
+      out += "<li>" + t.replace(/^([-*•]\s+)/, "") + "</li>";
+    }else{
+      if(inList){ out += "</ul>"; inList = false; }
+      out += t ? t + "<br>" : "<br>";
+    }
+  }
+  if(inList) out += "</ul>";
+  out = out.replace(/(https?:\/\/[^\s<]+|\/product\.html\?id=\d+)/g, '<a href="$1" target="_blank">$1</a>');
+  return out;
+}
+
+function aiGetHistory(){
+  try{ return JSON.parse(localStorage.getItem("aiChatHistory") || "[]"); }catch(e){ return []; }
+}
+function aiSetHistory(h){ localStorage.setItem("aiChatHistory", JSON.stringify(h.slice(-30))); }
+function aiPushMsg(role, content){
+  const h = aiGetHistory(); h.push({ role, content }); aiSetHistory(h);
+}
+function renderAiHistory(){
+  const body = document.getElementById("aiChatBody");
+  if(!body) return;
+  const h = aiGetHistory();
+  body.innerHTML = h.map(m=>`<div class="ai-msg ${m.role === "user" ? "user" : "agent"}">${m.role === "user" ? m.content.replace(/&/g,"&amp;").replace(/</g,"&lt;") : aiRender(m.content)}</div>`).join("");
+  body.scrollTop = body.scrollHeight;
+}
+function aiChipAsk(btn){ const inp = document.getElementById("aiChatInput"); if(inp){ inp.value = btn.textContent; aiSend(); } }
+
+async function aiSend(){
+  const inp = document.getElementById("aiChatInput");
+  const btn = document.getElementById("aiChatSend");
+  const body = document.getElementById("aiChatBody");
+  const text = (inp.value || "").trim();
+  if(!text || btn.disabled) return;
+  inp.value = "";
+  aiPushMsg("user", text);
+  renderAiHistory();
+  btn.disabled = true;
+  const tp = document.createElement("div");
+  tp.className = "ai-typing"; tp.id = "aiTyping";
+  tp.innerHTML = "<span></span><span></span><span></span>";
+  body.appendChild(tp); body.scrollTop = body.scrollHeight;
+  try{
+    const headers = { "Content-Type":"application/json" };
+    if(Store.token()) headers["Authorization"] = "Bearer " + Store.token();
+    const res = await fetch(API_BASE + "/ai-agent/chat", {
+      method:"POST", headers, body: JSON.stringify({ message: text, history: aiGetHistory().slice(-8) })
+    });
+    const data = await res.json().catch(()=>null);
+    let reply;
+    if(!res.ok) reply = (data && (data.message || data.reply)) || "عذراً، حاول مجدداً ⏳";
+    else reply = data.reply || "لم أفهم — جرّب صياغة أخرى 🤖";
+    document.getElementById("aiTyping")?.remove();
+    aiPushMsg("assistant", reply);
+    renderAiHistory();
+  }catch(err){
+    document.getElementById("aiTyping")?.remove();
+    aiPushMsg("assistant", "انقطع الاتصال ⏳ تحقق من الإنترنت وحاول مجدداً.");
+    renderAiHistory();
+  }
+  finally{ btn.disabled = false; inp.focus(); }
 }
 
 /* ===== إعدادات الموقع العامة (لوغو المطوّر + روابط التواصل) ===== */
