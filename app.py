@@ -860,14 +860,15 @@ def _fmt_balance(v):
         return str(v)
 
 def _provider_balance(prov):
-    """يجلب رصيد المزوّد الحي — يرجع (ok, text, note).
-    يجرّب مسار الرصيد المخصص أولاً ثم مسارات شمس الشائعة، ويقرأ أول قيمة
-    رقمية بمفتاح يدل على الرصيد من أي رد JSON."""
+    """يجلب رصيد المزوّد الحي — يرجع (ok, text, note, tried).
+    يجرّب مسار الرصيد المخصص أولاً ثم مسارات شمس الشائعة (GET/POST)،
+    ثم رد الكتالوج نفسه (يعمل حتماً عند المزوّدين المرتبطين) فقد يحمل الرصيد.
+    tried: قائمة كل المحاولات مع نتيجتها للتشخيص."""
     import requests as _rq
     tok = ((prov.get("token") or "") if isinstance(prov, dict) else "").strip()
     base = (((prov.get("url") or "") if isinstance(prov, dict) else "").strip().rstrip("/") or "https://api.shams4store.com")
     if not tok:
-        return False, "", "بلا توكن"
+        return False, "", "بلا توكن", []
     bpath = ((prov.get("balance_path") or "") if isinstance(prov, dict) else "").strip()
     cands = []
     if bpath:
@@ -875,35 +876,75 @@ def _provider_balance(prov):
     for p in ("/client/api/profile", "/client/api/user", "/client/api/balance", "/client/api/wallet"):
         if base + p not in cands:
             cands.append(base + p)
+    tried = []
     last_note = ""
     for url in cands:
-        for kw in ({"headers": {"api-token": tok}}, {"params": {"token": tok, "api_token": tok}}):
+        attempts = [("GET", {"headers": {"api-token": tok}}),
+                    ("GET", {"params": {"token": tok, "api_token": tok}}),
+                    ("POST", {"json": {"token": tok, "api_token": tok}})]
+        for method, kw in attempts:
+            tag = f"{method} {url}"
             try:
-                r = _rq.get(url, timeout=8, **kw)
-            except Exception as e:
-                last_note = f"تعذّر الوصول: {e}"
+                r = _rq.request(method, url, timeout=8, **kw)
+            except Exception:
+                tried.append({"url": url, "result": f"{method}: تعذّر الوصول"})
+                last_note = "تعذّر الوصول للمزوّد"
                 continue
             if not r.ok:
+                tried.append({"url": url, "result": f"{method}: http-{r.status_code}"})
                 last_note = f"http-{r.status_code}"
                 continue
             try:
                 d = r.json()
             except Exception:
+                tried.append({"url": url, "result": f"{method}: رد غير JSON"})
                 last_note = "رد غير JSON"
                 continue
             if not isinstance(d, (dict, list)):
+                tried.append({"url": url, "result": f"{method}: شكل رد غير متوقع"})
                 last_note = "شكل رد غير متوقع"
                 continue
             if isinstance(d, dict) and str(d.get("status") or "").upper() not in ("OK", "SUCCESS", ""):
-                last_note = str(d.get("msg") or d.get("message") or "رفض المزوّد")[:120]
+                msg = str(d.get("msg") or d.get("message") or "رفض المزوّد")[:120]
+                tried.append({"url": url, "result": f"{method}: {msg}"})
+                last_note = msg
                 continue
             found = _find_balance(d.get("data", d) if isinstance(d, dict) else d)
             if found is not None:
-                return True, _fmt_balance(found), url
+                return True, _fmt_balance(found), url, tried
+            tried.append({"url": url, "result": f"{method}: بلا حقل رصيد"})
             last_note = "لا يوجد حقل رصيد واضح في الرد"
+    # ملاذ أخير: رد الكتالوج نفسه — يعمل حتماً عند المزوّدين المرتبطين وقد يحمل الرصيد
+    try:
+        cpath = ((prov.get("catalog_path") or "") if isinstance(prov, dict) else "").strip()
+        if cpath:
+            curl, cmethod, ckw = _pjoin(base, cpath, "/products"), "POST", {"json": {"token": tok}}
+        else:
+            curl, cmethod, ckw = base + "/client/api/products", "GET", {"headers": {"api-token": tok}}
+        cr = _rq.request(cmethod, curl, timeout=12, **ckw)
+        if cr.ok:
+            try:
+                cd = cr.json()
+            except Exception:
+                cd = None
+            if isinstance(cd, dict):
+                f2 = _find_balance(cd)
+                if f2 is not None:
+                    return True, _fmt_balance(f2), "من رد الكتالوج", tried
+                tried.append({"url": curl, "result": "الكتالوج يعمل لكن بلا حقل رصيد"})
+                last_note = "الكتالوج يعمل لكن لا يحمل حقل رصيد — أدخل مسار الرصيد من توثيق مزوّدك"
+            else:
+                tried.append({"url": curl, "result": "رد الكتالوج ليس JSON dict"})
+        else:
+            tried.append({"url": curl, "result": f"الكتالوج: http-{cr.status_code}"})
+    except Exception as e:
+        emsg = str(e)
+        if tok:
+            emsg = emsg.replace(tok, "***")
+        tried.append({"url": "catalog", "result": f"تعذّر: {emsg[:120]}"})
     if tok and last_note:
         last_note = last_note.replace(tok, "***")
-    return False, "", last_note or "تعذّر قراءة الرصيد"
+    return False, "", last_note or "تعذّر قراءة الرصيد", tried
 
 def provider_buy(sku_row, player, qty, token=None, url=None, product_ref=None, order_path=""):
     """يرجع (ok, status, porder, resp) حيث status: completed|pending|failed.
@@ -3156,7 +3197,7 @@ def adm_prov_balance(pid):
     prov = _get_provider(pid)
     if not prov:
         return jsonify({"message": "المزوّد غير موجود"}), 404
-    ok, text, note = _provider_balance(prov)
+    ok, text, note, tried = _provider_balance(prov)
     if ok:
         try:
             with get_db() as db:
@@ -3165,7 +3206,7 @@ def adm_prov_balance(pid):
             pass
         return jsonify({"ok": True, "balance": text, "note": note,
                         "cached_at": datetime.now().strftime("%Y-%m-%d %H:%M")})
-    return jsonify({"ok": False, "balance": prov.get("balance_cache") or "", "note": note,
+    return jsonify({"ok": False, "balance": prov.get("balance_cache") or "", "note": note, "tried": tried,
                     "cached_at": str(prov.get("balance_at") or ""),
                     "message": f"تعذّر قراءة الرصيد الحي ({note}) — المعروض آخر قراءة محفوظة إن وُجدت"}), 200
 
@@ -3275,9 +3316,9 @@ def adm_prov_test(pid):
         pass
     all_ok = all(c["ok"] for c in checks)
     try:
-        _bok, _btext, _bnote = _provider_balance(prov)
+        _bok, _btext, _bnote, _btried = _provider_balance(prov)
     except Exception:
-        _bok, _btext, _bnote = False, "", "خطأ داخلي"
+        _bok, _btext, _bnote, _btried = False, "", "خطأ داخلي", []
     return jsonify({
         "message": "الاتصال سليم ✅ — المسارات تعمل" if all_ok else "يوجد خلل — راجع تفاصيل الفحص بالأسفل",
         "ok": all_ok,
@@ -3288,6 +3329,7 @@ def adm_prov_test(pid):
         "checks": checks,
         "balance": _btext if _bok else "",
         "balance_note": "" if _bok else _bnote,
+        "balance_tried": _btried,
     })
 
 

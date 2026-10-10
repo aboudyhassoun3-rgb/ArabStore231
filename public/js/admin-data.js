@@ -1276,7 +1276,8 @@ async function refreshBalance(pid, btn){
         <button class="btn-sm" style="margin-top:4px;" onclick="refreshBalance(${pid}, this)"><i class="fa-solid fa-arrows-rotate"></i> تحديث</button>`;
       toast("تم تحديث الرصيد ✅");
     }else{
-      toast("تعذّر قراءة الرصيد الحي (" + (r.note || "?") + ")" + (r.balance ? " — المعروض آخر قراءة محفوظة" : ""), "error");
+      const tried = (r.tried || []).map(t=>`• ${t.url}\n  ${t.result}`).join("\n");
+      alert(`تعذّر قراءة الرصيد الحي (${r.note || "؟"})\n\nالمحاولات:\n${tried || "—"}\n\n${r.balance ? "المعروض الآن آخر قراءة محفوظة." : "لا توجد قراءة محفوظة."}\n\nإن كان لمزوّدك مسار رصيد خاص، أدخله بحقل "مسار الرصيد" عند إضافة المزوّد.`);
       loadProviders();
     }
   }catch(err){ toast(err.message, "error"); }
@@ -1307,7 +1308,8 @@ async function testProvider(pid, btn){
     const r = await adminFetch(`/admin/providers/${pid}/test`, { method:"POST" });
     const lines = (r.checks || []).map(c=>`• ${c.label}: ${c.verdict}\n  ${c.url}`).join("\n");
     const balLine = r.balance ? `\n💰 رصيد المزوّد: ${r.balance}` : (r.balance_note ? `\n💰 الرصيد: تعذّر (${r.balance_note})` : "");
-    alert(`${r.message}\n\n${lines}\n\nالمنتجات المرصودة: ${r.products_found ?? 0}\nرابط الطلب: ${r.order_url}${balLine}`);
+    const balTried = (!r.balance && (r.balance_tried||[]).length) ? `\n--- محاولات الرصيد ---\n${r.balance_tried.map(t=>`• ${t.url}\n  ${t.result}`).join("\n")}` : "";
+    alert(`${r.message}\n\n${lines}\n\nالمنتجات المرصودة: ${r.products_found ?? 0}\nرابط الطلب: ${r.order_url}${balLine}${balTried}`);
     loadProviders();
   }catch(err){ toast(err.message, "error"); }
   finally{ if(btn){ btn.disabled = false; btn.innerHTML = orig; } }
