@@ -1253,7 +1253,10 @@ async function loadProviders(){
     <td id="provBal_${p.id}">${p.balance
       ? `<b style="color:var(--success); font-family:'Orbitron',monospace; font-size:11px;">💰 ${p.balance}</b><br><small style="color:var(--muted); font-size:9px;">${p.balance_at||''}</small>`
       : `<span class="text-muted" style="font-size:10px;">—</span>`}
-      <button class="btn-sm" style="margin-top:4px;" onclick="refreshBalance(${p.id}, this)"><i class="fa-solid fa-arrows-rotate"></i> تحديث</button></td>
+      <div style="display:flex; gap:4px; margin-top:4px; flex-wrap:wrap;">
+        <button class="btn-sm" onclick="refreshBalance(${p.id}, this)"><i class="fa-solid fa-arrows-rotate"></i> تحديث</button>
+        <button class="btn-sm" onclick="setBalanceManual(${p.id})">✏️ يدوي</button>
+      </div></td>
     <td>${p.linked_products}</td>
     <td><input type="number" id="importMargin_${p.id}" placeholder="10" min="0" step="0.5" style="width:70px; padding:7px; border-radius:8px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); font-size:11px;"></td>
     <td style="display:flex; gap:6px; flex-wrap:wrap;">
@@ -1273,7 +1276,10 @@ async function refreshBalance(pid, btn){
     const r = await adminFetch(`/admin/providers/${pid}/balance`);
     if(r.ok){
       if(cell) cell.innerHTML = `<b style="color:var(--success); font-family:'Orbitron',monospace; font-size:11px;">💰 ${r.balance}</b><br><small style="color:var(--muted); font-size:9px;">${r.cached_at||''}</small>
-        <button class="btn-sm" style="margin-top:4px;" onclick="refreshBalance(${pid}, this)"><i class="fa-solid fa-arrows-rotate"></i> تحديث</button>`;
+        <div style="display:flex; gap:4px; margin-top:4px; flex-wrap:wrap;">
+          <button class="btn-sm" onclick="refreshBalance(${pid}, this)"><i class="fa-solid fa-arrows-rotate"></i> تحديث</button>
+          <button class="btn-sm" onclick="setBalanceManual(${pid})">✏️ يدوي</button>
+        </div>`;
       toast("تم تحديث الرصيد ✅");
     }else{
       const tried = (r.tried || []).map(t=>`• ${t.url}\n  ${t.result}`).join("\n");
@@ -1282,6 +1288,17 @@ async function refreshBalance(pid, btn){
     }
   }catch(err){ toast(err.message, "error"); }
   finally{ if(btn && !cell){ btn.disabled = false; btn.innerHTML = origBtn; } }
+}
+
+async function setBalanceManual(pid){
+  const v = prompt("أدخل رصيد المزوّد الحالي كما يظهر بلوحة المزوّد (مثال: 1250$):");
+  if(v === null) return;
+  if(!v.trim()){ toast("أدخل قيمة", "error"); return; }
+  try{
+    const r = await adminFetch(`/admin/providers/${pid}/balance-manual`, { method:"POST", body: JSON.stringify({ balance: v.trim() }) });
+    toast(r.message);
+    loadProviders();
+  }catch(err){ toast(err.message, "error"); }
 }
 
 async function refreshAllBalances(btn){
@@ -1293,7 +1310,10 @@ async function refreshAllBalances(btn){
         const r = await adminFetch(`/admin/providers/${p.id}/balance`);
         const cell = document.getElementById("provBal_" + p.id);
         if(cell && r.ok) cell.innerHTML = `<b style="color:var(--success); font-family:'Orbitron',monospace; font-size:11px;">💰 ${r.balance}</b><br><small style="color:var(--muted); font-size:9px;">${r.cached_at||''}</small>
-          <button class="btn-sm" style="margin-top:4px;" onclick="refreshBalance(${p.id}, this)"><i class="fa-solid fa-arrows-rotate"></i> تحديث</button>`;
+          <div style="display:flex; gap:4px; margin-top:4px; flex-wrap:wrap;">
+            <button class="btn-sm" onclick="refreshBalance(${p.id}, this)"><i class="fa-solid fa-arrows-rotate"></i> تحديث</button>
+            <button class="btn-sm" onclick="setBalanceManual(${p.id})">✏️ يدوي</button>
+          </div>`;
       }catch(e){ /* مزوّد واحد فاشل لا يوقف البقية */ }
     }
     toast("تم تحديث الأرصدة ✅");

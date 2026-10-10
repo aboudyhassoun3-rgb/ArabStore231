@@ -829,8 +829,8 @@ def _shams_check(base, tok, porder):
     return "pending", ""
 
 
-_BAL_KEYS = ("balance", "credit", "wallet", "funds", "money")
-_BAL_SKIP = ("price", "cost", "total", "spent", "paid", "fee", "discount", "sold")
+_BAL_KEYS = ("balance", "credit", "wallet", "funds", "money", "points", "point", "coins", "coin", "رصيد")
+_BAL_SKIP = ("price", "cost", "spent", "paid", "fee", "discount", "sold")
 
 def _find_balance(obj, depth=0):
     """يبحث بشكل متكرر عن أول قيمة رقمية بمفتاح يدل على الرصيد."""
@@ -912,7 +912,16 @@ def _provider_balance(prov):
             found = _find_balance(d.get("data", d) if isinstance(d, dict) else d)
             if found is not None:
                 return True, _fmt_balance(found), url, tried
-            tried.append({"url": url, "result": f"{method}: بلا حقل رصيد"})
+            keys_hint = ""
+            if isinstance(d, dict):
+                try:
+                    top = [str(k) for k in list(d.keys())[:12]]
+                    inner = d.get("data", None)
+                    inner_keys = [str(k) for k in list(inner.keys())[:12]] if isinstance(inner, dict) else []
+                    keys_hint = f" — الحقول المتاحة: {top}" + (f" / داخل data: {inner_keys}" if inner_keys else "")
+                except Exception:
+                    keys_hint = ""
+            tried.append({"url": url, "result": f"{method}: بلا حقل رصيد{keys_hint}"})
             last_note = "لا يوجد حقل رصيد واضح في الرد"
     # ملاذ أخير: رد الكتالوج نفسه — يعمل حتماً عند المزوّدين المرتبطين وقد يحمل الرصيد
     try:
@@ -3209,6 +3218,25 @@ def adm_prov_balance(pid):
     return jsonify({"ok": False, "balance": prov.get("balance_cache") or "", "note": note, "tried": tried,
                     "cached_at": str(prov.get("balance_at") or ""),
                     "message": f"تعذّر قراءة الرصيد الحي ({note}) — المعروض آخر قراءة محفوظة إن وُجدت"}), 200
+
+@app.post("/api/admin/providers/<int:pid>/balance-manual")
+@require_admin
+def adm_prov_balance_manual(pid):
+    """رصيد يدوي يضبطه الأدمن من لوحة المزوّد — يظهر فوراً ويبقى حتى ينجح السحب التلقائي."""
+    b = request.get_json(force=True, silent=True) or {}
+    text = str(b.get("balance") or "").strip()[:50]
+    if not text:
+        return jsonify({"message": "أدخل الرصيد"}), 400
+    prov = _get_provider(pid)
+    if not prov:
+        return jsonify({"message": "المزوّد غير موجود"}), 404
+    try:
+        with get_db() as db:
+            db.execute("UPDATE providers SET balance_cache=?, balance_at=CURRENT_TIMESTAMP WHERE id=?", (text + " ✏️", pid))
+    except Exception as e:
+        return jsonify({"message": f"تعذّر الحفظ: {e}"}), 500
+    alog("💰 رصيد يدوي للمزوّد", prov.get("name") or f"#{pid}", text)
+    return jsonify({"message": "تم حفظ الرصيد اليدوي ✅"})
 
 def _provider_products(prov):
     try:
