@@ -115,60 +115,6 @@ async function apiFetch(path, opts={}){
   return data;
 }
 
-/* ===== صورة الحساب: الصورة الأصلية للبريد إن وُجدت، وإلا الأفاتار الأحمر الأساسي ===== */
-const AVATAR_RED_HTML = '<i class="fa-solid fa-user"></i>';
-let _avatarReq = 0;
-let _avatarPaintedFor = null;
-
-function _paintRedFallback(){
-  document.querySelectorAll(".drawer-avatar").forEach(box=>{
-    box.innerHTML = AVATAR_RED_HTML;
-  });
-}
-
-/* بديل صورة الأفاتار عند كسر رابط الصورة الأصلية — يُستدعى من onerror */
-function _avatarImgFallback(img){
-  const box = img && img.closest ? img.closest(".drawer-avatar") : null;
-  if(!box) return;
-  box.innerHTML = AVATAR_RED_HTML;
-}
-
-async function _sha256Hex(text){
-  const data = new TextEncoder().encode(text);
-  const buf = await crypto.subtle.digest("SHA-256", data);
-  return [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,"0")).join("");
-}
-
-/* يعرض الصورة الأصلية المرتبطة بالبريد (Gravatar) إن وُجدت، وإلا الأفاتار الأحمر الأساسي */
-function renderDrawerAvatar(user){
-  const boxes = document.querySelectorAll(".drawer-avatar");
-  if(!boxes.length) return;
-  const email = ((user && user.email) || "").trim().toLowerCase();
-  // المزامنة الدورية (كل 30 ثانية) لا تعيد رسم نفس الصورة — تمنع الوميض
-  if(email === _avatarPaintedFor && document.querySelector(".drawer-avatar img")) return;
-  _avatarPaintedFor = email;
-  // الافتراضي دائماً: الأفاتار الأحمر الأساسي — ثم نحاول الترقية للصورة الأصلية
-  _paintRedFallback();
-  if(!email) return;
-  const my = ++_avatarReq;
-  // بدون WebCrypto (سياق غير آمن) — نبقى على الأحمر الأساسي
-  if(!window.crypto || !crypto.subtle || !window.TextEncoder) return;
-  _sha256Hex(email).then(hash=>{
-    if(my !== _avatarReq) return;
-    const url = "https://www.gravatar.com/avatar/" + hash + "?s=160&d=404";
-    const probe = new Image();
-    probe.decoding = "async";
-    probe.onload = ()=>{
-      if(my !== _avatarReq) return;
-      document.querySelectorAll(".drawer-avatar").forEach(box=>{
-        box.innerHTML = `<img class="avatar-photo" src="${url}" alt="" loading="lazy" decoding="async" onerror="_avatarImgFallback(this)">`;
-      });
-    };
-    probe.onerror = ()=>{ /* لا توجد صورة أصلية — نبقى على الأحمر الأساسي */ };
-    probe.src = url;
-  }).catch(()=>{});
-}
-
 /* ===== الدرج: تحديث حالة المستخدم (زائر / مسجل) ===== */
 function renderAuthState(){
   const user = Store.user();
@@ -188,7 +134,6 @@ function renderAuthState(){
     if(balancePill) balancePill.textContent = "$0.00";
     guestOnlyEls.forEach(el => el.style.display = "none");
     if(apiMenuItem) apiMenuItem.style.display = "none";
-    renderDrawerAvatar(null);
     return;
   }
   if(nameEl){
@@ -207,7 +152,6 @@ function renderAuthState(){
   const ownerAdminItem = document.getElementById("ownerAdminMenuItem");
   // إظهار لوحة الأدمن لأي حساب صلاحياته أدمن (المالك أو أي بريد مضاف من لوحة الأدمن)
   if(ownerAdminItem) ownerAdminItem.style.display = user.is_admin ? "" : "none";
-  renderDrawerAvatar(user);
 }
 
 function logoutUser(e){
