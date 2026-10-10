@@ -123,6 +123,20 @@
       </div>
 
       <div class="panel">
+        <div class="panel-head"><h3>📣 بث إشعار فوري للمستخدمين</h3><span class="text-muted" id="pushSubCount" style="font-size:11px;">—</span></div>
+        <div class="field-hint" style="margin-bottom:10px;">يوصل <b>حتى والموقع مغلق</b> عند كل من فعّل الإشعارات (مستخدمون وضيوف). استخدمه لمنتج جديد، عرض، أو عودة منتج نافد.</div>
+        <div class="admin-fields-grid">
+          <div class="field"><label>العنوان</label><input type="text" id="pushTitle" placeholder="🎮 منتج جديد!" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);"></div>
+          <div class="field"><label>النص</label><input type="text" id="pushMessage" placeholder="وصل شحن فري فاير بسعر جديد ✨" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);"></div>
+          <div class="field"><label>الرابط عند الضغط</label><input type="text" id="pushUrl" value="/store.html" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); direction:ltr;"></div>
+        </div>
+        <div style="display:flex; gap:8px; margin-top:10px; flex-wrap:wrap;">
+          <button class="btn btn-primary" style="width:auto; padding:11px 22px;" onclick="sendPushBroadcast(this)"><i class="fa-solid fa-tower-broadcast"></i> بث الآن</button>
+          <button class="btn-sm" onclick="loadPushStatus()"><i class="fa-solid fa-arrows-rotate"></i> تحديث العدد</button>
+        </div>
+      </div>
+
+      <div class="panel">
         <div class="panel-head"><h3>آخر الطلبات</h3><button class="btn-sm" onclick="goSection('orders', document.querySelector('[data-section=orders]'))">عرض الكل</button></div>
         <div class="table-scroll">
           <table class="data-table">
@@ -908,7 +922,7 @@
 </div>
 
 
-<script src="js/app.js?v=5"></script>
+<script src="js/app.js?v=6"></script>
 <script>
   const ADMIN_TOKEN_KEY = "admin_token";
 
@@ -967,6 +981,6 @@
     }
   });
 </script>
-<script src="js/admin-data.js?v=5"></script>
+<script src="js/admin-data.js?v=6"></script>
 </body>
 </html>

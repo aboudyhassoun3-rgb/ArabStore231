@@ -259,18 +259,23 @@ function pushKeyBytes(base64){
 }
 
 async function enableWebPush(){
-  if(!Store.token() || !("serviceWorker" in navigator) || !("PushManager" in window)) return;
+  // يعمل للمستخدم والضيف معاً — الضيف يُسجَّل كـ user_id=0 ليصله جديد المنتجات والعروض
+  if(!("serviceWorker" in navigator) || !("PushManager" in window)) return false;
   try{
+    if(!("Notification" in window) || Notification.permission !== "granted") return false;
     const keyRes = await fetch(API_BASE + "/push/public-key");
     const keyData = await keyRes.json();
-    if(!keyData.enabled || !keyData.public_key || Notification.permission !== "granted") return;
+    if(!keyData.enabled || !keyData.public_key) return false;
+    if(localStorage.getItem("pushSubscribed") === "1") return true;
     const registration = await navigator.serviceWorker.register("/sw.js");
     let subscription = await registration.pushManager.getSubscription();
     if(!subscription){
       subscription = await registration.pushManager.subscribe({ userVisibleOnly:true, applicationServerKey:pushKeyBytes(keyData.public_key) });
     }
     await apiFetch("/push/subscribe", { method:"POST", body:JSON.stringify(subscription.toJSON()) });
-  }catch(err){ /* إشعارات الخلفية اختيارية ولا تعطل الموقع */ }
+    localStorage.setItem("pushSubscribed", "1");
+    return true;
+  }catch(err){ /* إشعارات الخلفية اختيارية ولا تعطل الموقع */ return false; }
 }
 
 function showSystemNotification(n){

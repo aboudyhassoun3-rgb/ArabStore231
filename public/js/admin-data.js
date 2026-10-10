@@ -11,7 +11,7 @@ const SECTION_TITLES = {
 };
 
 const SECTION_LOADERS = {
-  dashboard: ()=>Promise.all([loadDashboard(), loadProfits(), loadSettings(), loadAdmins(), loadWebAdmins()]),
+  dashboard: ()=>Promise.all([loadDashboard(), loadProfits(), loadSettings(), loadAdmins(), loadWebAdmins(), loadPushStatus()]),
 
   orders: ()=>Promise.all([loadOrders("all"), loadShopOrders()]),
   deposits: ()=>Promise.all([loadDeposits(), loadDepositMethods()]),
@@ -488,6 +488,33 @@ async function acceptDeposit(id){
 async function rejectDeposit(id){
   try{ await adminFetch(`/admin/deposits/${id}/reject`, { method:"POST" }); toast("تم رفض الإيداع"); loadDeposits(); }
   catch(err){ toast(err.message, "error"); }
+}
+
+/* ===== بث إشعارات Push (تصل حتى والموقع مغلق) ===== */
+async function loadPushStatus(){
+  try{
+    const s = await adminFetch("/admin/push/status");
+    const el = document.getElementById("pushSubCount");
+    if(el) el.textContent = s.enabled
+      ? `🔔 ${s.subscribers} مشترك (${s.users} مستخدم + ${s.guests} ضيف)`
+      : "⚠️ غير مفعّل";
+  }catch(err){ /* لا نكسر تحميل اللوحة */ }
+}
+async function sendPushBroadcast(btn){
+  const title = document.getElementById("pushTitle").value.trim();
+  const message = document.getElementById("pushMessage").value.trim();
+  const url = document.getElementById("pushUrl").value.trim() || "/store.html";
+  if(!title || !message){ toast("أدخل العنوان والنص", "error"); return; }
+  if(!confirm(`بث "${title}" لكل المشتركين؟`)) return;
+  if(btn){ btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> جاري البث...'; }
+  try{
+    const r = await adminFetch("/admin/push/broadcast", { method:"POST", body: JSON.stringify({ title, message, url }) });
+    toast(r.message);
+    document.getElementById("pushTitle").value = "";
+    document.getElementById("pushMessage").value = "";
+    loadPushStatus();
+  }catch(err){ toast(err.message, "error"); }
+  finally{ if(btn){ btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-tower-broadcast"></i> بث الآن'; } }
 }
 
 /* ===== البحث الشامل (طلب / مستخدم / إيداع) ===== */

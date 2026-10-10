@@ -1667,8 +1667,10 @@ def aorder_st(ref):
         if st == "failed":
             add_balance(o[1], int(o[2] or 0), f"استرجاع رفض طلب {o[3]}")
             notify(o[1], "تم رفض الطلب", "تم استرجاع رصيدك", "error")
+            push_to_user(o[1], "تم رفض الطلب", "تم استرجاع رصيدك", "/orders.html")
         else:
             notify(o[1], "تم قبول طلبك ✅", o[3], "success")
+            push_to_user(o[1], "تم قبول طلبك ✅", o[3], "/orders.html")
     alog("✅ قبول طلب" if st != "failed" else "❌ رفض طلب", f"S{o[0]}", o[3])
     return jsonify({"message": "تم ✅"})
 
@@ -1693,10 +1695,12 @@ def adep_act(did, act):
             db.execute("UPDATE balances SET balance=balance+? WHERE user_id=?", (int(d[1]), d[0]))
             db.execute("INSERT INTO transactions(user_id,type,amount,note) VALUES(?, 'in', ?, ?)", (d[0], int(d[1]), f"قبول إيداع {d[2]}"))
             notify(d[0], "تم قبول إيداعك ✅", d[2], "success")
+            push_to_user(d[0], "تم قبول إيداعك ✅", f"{d[2]} — {int(d[1]):,} ل.س", "/wallet.html")
             alog("✅ قبول إيداع", f"#{did}", f"{d[2]} — {int(d[1]):,} ل.س")
         else:
             db.execute("UPDATE deposit_requests SET status='rejected' WHERE id=?", (did,))
             notify(d[0], "تم رفض الإيداع", d[2], "error")
+            push_to_user(d[0], "تم رفض الإيداع", d[2], "/wallet.html")
             alog("❌ رفض إيداع", f"#{did}", d[2])
     return jsonify({"message": "تم ✅"})
 
@@ -1801,6 +1805,7 @@ def abal(wid):
     uid = int(u["site_user_id"] if "site_user_id" in u.keys() else u[4])
     nb = add_balance(uid, amt, "تعديل أدمن")
     notify(uid, "تعديل رصيد 💰", f"{amt:+,} ل.س", "info")
+    push_to_user(uid, "تعديل رصيد 💰", f"{amt:+,} ل.س", "/wallet.html")
     try:
         _em = u["email"] if "email" in u.keys() else u[2]
     except Exception:
@@ -1939,6 +1944,8 @@ def adm_prods_add():
             db.execute("INSERT INTO products(name,category,emoji,description,image,subsection_id,public_id) VALUES(?,?,?,?,?,?,?)",
                        (b.get("name", "منتج جديد"), b.get("category", ""), b.get("emoji", "🎮"), b.get("description", ""),
                         img, b.get("subsection_id"), pub))
+    _pname = (b.get("name") or "منتج جديد").strip()[:60]
+    push_broadcast("🎮 منتج جديد في المتجر", f"{_pname} — صار متوفراً الآن ✨", "/store.html")
     return jsonify({"message": "تمت الإضافة ✅"})
 
 @app.put("/api/admin/products/<int:pid>")
@@ -2321,6 +2328,7 @@ def adm_user_tier(wid):
             if USE_PG: db.execute("INSERT INTO user_tier(user_id,tier_id) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET tier_id=excluded.tier_id", (uid, tid))
             else: db.execute("INSERT INTO user_tier(user_id,tier_id) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET tier_id=excluded.tier_id", (uid, tid))
             notify(uid, "مستوى خصم جديد 🎖️", "تم تفعيل خصم خاص لحسابك", "success")
+            push_to_user(uid, "مستوى خصم جديد 🎖️", "تم تفعيل خصم خاص لحسابك", "/store.html")
         else:
             db.execute("DELETE FROM user_tier WHERE user_id=?", (uid,))
     try:
@@ -2620,26 +2628,165 @@ def admin_auto():
     return jsonify({"token": issue_token(None, admin=True, owner=(email or "").lower() in OWNER_EMAILS), "owner": (email or "").lower() in OWNER_EMAILS})
 
 # --- إشعارات الأدمن + push ---
+def _vapid_keys():
+    """مفاتيح VAPID: من البيئة أولاً، وإلا توليد مرة واحدة وحفظها في الإعدادات
+    (تبقى ثابتة ما دامت قاعدة البيانات دائمة — فلا تنكسر الاشتراكات)."""
+    pub = os.environ.get("ARAB_VAPID_PUBLIC_KEY", "").strip()
+    prv = os.environ.get("ARAB_VAPID_PRIVATE_KEY", "").strip()
+    if pub and prv:
+        return pub, prv
+    try:
+        with get_db() as db:
+            r = db.execute("SELECT value FROM settings WHERE key='vapid_public_key'").fetchone()
+            r2 = db.execute("SELECT value FROM settings WHERE key='vapid_private_key'").fetchone()
+            if r and r[0] and r2 and r2[0]:
+                return r[0], r2[0]
+    except Exception:
+        pass
+    try:
+        import base64 as _b64
+        from py_vapid import Vapid as _V
+        v = _V()
+        v.generate_keys()
+        nums = v.private_key.private_numbers()
+        prv_b = _b64.urlsafe_b64encode(nums.private_value.to_bytes(32, "big")).rstrip(b"=").decode()
+        pubnums = v.public_key.public_numbers()
+        pub_b = _b64.urlsafe_b64encode(b"\x04" + pubnums.x.to_bytes(32, "big") + pubnums.y.to_bytes(32, "big")).rstrip(b"=").decode()
+        set_setting("vapid_public_key", pub_b)
+        set_setting("vapid_private_key", prv_b)
+        return pub_b, prv_b
+    except Exception as e:
+        print(f"WARNING: vapid keygen failed: {e}")
+        return "", ""
+
+def _push_send_one(endpoint, p256dh, auth, title, message, url="/store.html"):
+    """إرسال push واحد — يرجع 'sent' أو 'gone' (اشتراك منتهٍ) أو 'error'."""
+    try:
+        pub, prv = _vapid_keys()
+        if not pub or not prv:
+            return "error"
+        from py_vapid import Vapid as _V
+        from pywebpush import webpush as _wp
+        import json as _j
+        v = _V.from_string(prv)
+        _wp({"endpoint": endpoint, "keys": {"p256dh": p256dh, "auth": auth}},
+            _j.dumps({"title": title, "message": message, "url": url}, ensure_ascii=False),
+            vapid_private_key=v, vapid_claims={"sub": "mailto:admin@arab2store.vercel.app"},
+            timeout=10, ttl=86400)
+        return "sent"
+    except Exception as e:
+        s = str(e)
+        if "410" in s or "404" in s or "expired" in s.lower():
+            try:
+                with get_db() as db:
+                    db.execute("DELETE FROM push_subscriptions WHERE endpoint=?", (endpoint,))
+            except Exception:
+                pass
+            return "gone"
+        return "error"
+
+def push_to_user(uid, title, message, url="/activity.html"):
+    """push لمستخدم محدد (كل أجهزته) — صامت تماماً ولا يكسر أي مسار."""
+    try:
+        with get_db() as db:
+            rows = db.execute("SELECT endpoint,p256dh,auth FROM push_subscriptions WHERE user_id=?", (uid,)).fetchall()
+        for r in rows:
+            try:
+                _push_send_one(r[0], r[1], r[2], title, message, url)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+def push_broadcast(title, message, url="/store.html"):
+    """بث لكل المشتركين (مستخدمون وضيوف) — يرجع (sent, gone)."""
+    sent = gone = 0
+    try:
+        with get_db() as db:
+            rows = db.execute("SELECT endpoint,p256dh,auth FROM push_subscriptions").fetchall()
+        for r in rows:
+            try:
+                res = _push_send_one(r[0], r[1], r[2], title, message, url)
+                if res == "sent":
+                    sent += 1
+                elif res == "gone":
+                    gone += 1
+            except Exception:
+                pass
+    except Exception:
+        pass
+    return sent, gone
+
 @app.get("/api/push/public-key")
 def push_key():
     key = os.environ.get("ARAB_VAPID_PUBLIC_KEY", "").strip()
+    if not key:
+        key, _ = _vapid_keys()
     if not key:
         return jsonify({"enabled": False, "message": "إشعارات الخلفية غير مفعّلة بعد"})
     return jsonify({"enabled": True, "public_key": key})
 
 @app.post("/api/push/subscribe")
-@require_auth
 def push_sub():
+    """اشتراك بخدمة push — يعمل للمستخدم (يُربط بحسابه) وللضيف (user_id=0) ليصله جديد المنتجات."""
     body = request.get_json(force=True, silent=True) or {}
     ep = str(body.get("endpoint") or "")
     ks = body.get("keys") or {}
     if not ep or not ks.get("p256dh") or not ks.get("auth"):
         return jsonify({"message": "بيانات غير صالحة"}), 400
-    uid = int(request.wu["site_user_id"] if "site_user_id" in request.wu.keys() else request.wu[4])
+    uid = 0
+    try:
+        h = request.headers.get("Authorization", "")
+        if h.startswith("Bearer "):
+            wid = token_to_web(h[7:])
+            if wid:
+                w = get_web_by_id(wid)
+                if w:
+                    uid = int(w["site_user_id"] if "site_user_id" in w.keys() else w[4])
+    except Exception:
+        pass
     with get_db() as db:
         if USE_PG: db.execute("INSERT INTO push_subscriptions(user_id,endpoint,p256dh,auth) VALUES(?,?,?,?) ON CONFLICT(endpoint) DO UPDATE SET user_id=excluded.user_id,p256dh=excluded.p256dh,auth=excluded.auth", (uid, ep, ks.get("p256dh"), ks.get("auth")))
         else: db.execute("INSERT OR REPLACE INTO push_subscriptions(user_id,endpoint,p256dh,auth) VALUES(?,?,?,?)", (uid, ep, ks.get("p256dh"), ks.get("auth")))
-    return jsonify({"message": "تم تفعيل إشعارات الخلفية"})
+    return jsonify({"message": "تم تفعيل الإشعارات ✅ ستصلك التنبيهات حتى بعد إغلاق الموقع"})
+
+@app.post("/api/push/unsubscribe")
+def push_unsub():
+    body = request.get_json(force=True, silent=True) or {}
+    ep = str(body.get("endpoint") or "")
+    if ep:
+        try:
+            with get_db() as db:
+                db.execute("DELETE FROM push_subscriptions WHERE endpoint=?", (ep,))
+        except Exception:
+            pass
+    return jsonify({"message": "تم إيقاف الإشعارات"})
+
+@app.get("/api/admin/push/status")
+@require_admin
+def adm_push_status():
+    pub, _ = _vapid_keys()
+    with get_db() as db:
+        try: total = db.execute("SELECT COUNT(*) FROM push_subscriptions").fetchone()[0]
+        except Exception: total = 0
+        try: users = db.execute("SELECT COUNT(*) FROM push_subscriptions WHERE user_id<>0").fetchone()[0]
+        except Exception: users = 0
+    return jsonify({"enabled": bool(pub), "subscribers": int(total or 0), "users": int(users or 0),
+                    "guests": int(total or 0) - int(users or 0)})
+
+@app.post("/api/admin/push/broadcast")
+@require_admin
+def adm_push_broadcast():
+    """بث إشعار فوري لكل المشتركين حتى والموقع مغلق عندهم."""
+    b = request.get_json(force=True, silent=True) or {}
+    title = (b.get("title") or "").strip()[:80]
+    message = (b.get("message") or "").strip()[:200]
+    url = (b.get("url") or "/store.html").strip()[:200] or "/store.html"
+    if not title or not message:
+        return jsonify({"message": "أدخل العنوان والنص"}), 400
+    sent, gone = push_broadcast(title, message, url)
+    alog("📣 بث إشعار", f"وصل {sent}", title)
+    return jsonify({"message": f"تم البث ✅ وصل {sent} جهاز" + (f" (أُزيل {gone} اشتراك منتهٍ)" if gone else ""), "sent": sent, "gone": gone})
 @app.post("/api/admin/push/subscribe")
 @require_admin
 def admin_push():
@@ -2895,6 +3042,7 @@ def adm_shop_acc(oid):
         if not o: return jsonify({"message": "غير موجود"}), 404
         db.execute("UPDATE orders SET status='completed' WHERE id=?", (oid,))
         notify(o[0], "تم قبول طلبك ✅", o[1], "success")
+        push_to_user(o[0], "تم قبول طلبك ✅", o[1], "/orders.html")
     alog("✅ قبول طلب يدوي", f"S{oid}", o[1])
     return jsonify({"message": "تم القبول ✅"})
 
@@ -2907,6 +3055,7 @@ def adm_shop_rej(oid):
         db.execute("UPDATE orders SET status='failed' WHERE id=?", (oid,))
         add_balance(o[0], int(o[1] or 0), f"استرجاع رفض طلب {o[2]}")
         notify(o[0], "تم رفض الطلب", "تم استرجاع رصيدك", "error")
+        push_to_user(o[0], "تم رفض الطلب", "تم استرجاع رصيدك", "/orders.html")
     alog("❌ رفض طلب يدوي", f"S{oid}", o[2])
     return jsonify({"message": "تم الرفض واسترجاع الرصيد ✅"})
 
@@ -3390,6 +3539,8 @@ def adm_prov_import(pid):
             db.execute("INSERT INTO skus(product_id,name,price,cost,public_id) VALUES(?,?,?,?,?)",
                        (newpid, name, round(price * (1 + margin / 100), 4), price, str(secrets.randbelow(90000) + 10000)))
             n += 1
+    if n:
+        push_broadcast("🎮 منتجات جديدة وصلت", f"{n} منتج جديد صار متوفراً في المتجر ✨", "/store.html")
     return jsonify({"message": f"تم استيراد {n} منتج ✅"})
 
 @app.get("/api/admin/providers/<int:pid>/products/export")
@@ -3520,6 +3671,8 @@ def adm_csv():
             imported += 1
         db.execute("INSERT INTO import_batches(id,items) VALUES(?,?)", (batch, len(created)))
         for kind, ref in created: db.execute("INSERT INTO import_items(batch_id,kind,ref_id) VALUES(?,?,?)", (batch, kind, ref))
+    if imported:
+        push_broadcast("🎮 منتجات جديدة وصلت", f"{imported} إضافة جديدة صارت متوفرة في المتجر ✨", "/store.html")
     return jsonify({"message": f"تم استيراد {imported} باقة (تخطّي {skipped_un} غير مصنّف)", "batch_id": batch, "skipped_unknown": skipped_un, "skipped_duplicate": dup})
 
 @app.post("/api/admin/providers/import-file")
@@ -3632,6 +3785,8 @@ def adm_prov_import_file():
             if USE_PG: db.execute("INSERT INTO category_links(category_id,provider_id,provider_product) VALUES(?,?,?) ON CONFLICT(category_id) DO UPDATE SET provider_id=excluded.provider_id,provider_product=excluded.provider_product", (skid, provid, ext_id))
             else: db.execute("INSERT OR REPLACE INTO category_links(category_id,provider_id,provider_product) VALUES(?,?,?)", (skid, provid, ext_id))
             imported += 1
+    if imported:
+        push_broadcast("🎮 منتجات جديدة وصلت", f"{imported} منتج جديد صار متوفراً في المتجر ✨", "/store.html")
     return jsonify({"message": f"تم استيراد وربط {imported} منتج ✅ (تخطّي {skipped} غير مفهوم، مكرر {dup})",
                     "imported": imported, "skipped": skipped, "duplicates": dup,
                     "skipped_sample": skipped_sample, "sections": sorted(sections_used), "provider_id": provid})
