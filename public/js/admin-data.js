@@ -1699,6 +1699,8 @@ async function loadSettings(){
     document.getElementById("settingsAiPrompt").value = s.ai_image_prompt_template || "";
   }
   const setVal = (id, v)=>{ const el = document.getElementById(id); if(el) el.value = v || ""; };
+  setVal("settingsAiType", s.ai_image_api_type || "custom");
+  setVal("settingsAiModel", s.ai_image_model || "");
   setVal("settingsAiPromptProduct", s.ai_image_prompt_product);
   setVal("settingsAiPromptSection", s.ai_image_prompt_section);
   setVal("settingsAdminChatIds", s.admin_notify_chat_ids);
@@ -1862,6 +1864,8 @@ async function saveSettings(){
   const payload = {
     exchange_rate, welcome_message, support_username, welcome_popup_enabled, welcome_popup_text,
     ai_image_api_url, ai_image_api_key, ai_image_prompt_template,
+    ai_image_api_type: getVal("settingsAiType") || "custom",
+    ai_image_model: getVal("settingsAiModel"),
     ai_image_prompt_product: getVal("settingsAiPromptProduct"),
     ai_image_prompt_section: getVal("settingsAiPromptSection"),
     support_whatsapp_number: getVal("settingsWaNumber"),

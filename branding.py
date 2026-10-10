@@ -278,6 +278,287 @@ def official_mark(name):
     return None
 
 
+# ------------------------------------------------------------------
+# موسوعة الشعارات: وصف غني يُرسل للـ AI مع اسم اللعبة/المنتج ليفهم
+# ما هو، ودوره، وتفاصيل شعاره وألوانه وعناصره الأيقونية بدقة.
+# key: كلمات مطابقة — value: (الاسم الرسمي, ما هو, العناصر الأيقونية,
+#                             الألوان الرسمية, وصف الشعار, دور العملة/المنتج)
+# ------------------------------------------------------------------
+BRAND_PROFILES = [
+    (("pubg", "ببجي"),
+     ("PUBG Mobile",
+      "the world's most famous mobile battle royale shooter",
+      "military soldier helmet (level-3 Spetsnaz helmet), golden frying pan, airdrop supply crate falling with parachute, orange smoke signals, war-torn battleground",
+      "military tan khaki and dark charcoal with vivid orange #f2a900",
+      "bold rugged stencil-style PUBG lettering with military attitude",
+      "Unknown Cash (UC) is its in-game currency for outfits, gun skins, crates and the Royale Pass")),
+    (("free fire", "فري فاير", "فرى فاير"),
+     ("Free Fire",
+      "Garena's fast-paced mobile battle royale",
+      "orange-red flame swirl, airdrop boxes, graffiti street style, booyah fire energy, survival battleground vibes",
+      "fiery orange #ff6b00, hot red and deep black",
+      "flame-shaped FF mark burning in orange and white",
+      "Diamonds are its top-up currency for characters, bundles, weapon skins and Luck Royale spins")),
+    (("fortnite", "فورتنايت"),
+     ("Fortnite",
+      "epic cartoon-style battle royale with building mechanics",
+      "purple storm clouds, supply llama pinata, battle bus balloon, V-Bucks cards, vibrant comic shading",
+      "electric purple #7c3aed, cyan and bright yellow",
+      "stylized runic FN letters",
+      "V-Bucks buy battle-pass tiers, emotes and character skins")),
+    (("call of duty", "كود موبايل", "كول اوف", "codm", "cod "),
+     ("Call of Duty Mobile",
+      "realistic military first-person shooter",
+      "skull-masked special soldier, dog tags, night-vision green glow, helicopter and battlefield smoke",
+      "gunmetal grey #3a3a3a with tactical yellow #ffd23f",
+      "heavy stencil COD lettering",
+      "CP Points unlock the battle pass, lucky draws and legendary weapons")),
+    (("blood strike", "بلود سترايك"),
+     ("Blood Strike",
+      "stylish fast arena battle royale shooter",
+      "red strike slash across the frame, striker operatives, muzzle flashes, urban combat zone",
+      "blood red #c40f28, black and white",
+      "sharp BS monogram cut by a red slash",
+      "Gold top-up for operators, weapon blueprints and the Strike Pass")),
+    (("farlight", "فارلايت"),
+     ("Farlight 84",
+      "futuristic hero shooter with capsule-drop entry",
+      "space capsule landing pods, jetpacks, neon wasteland city, hero squad silhouettes",
+      "sky blue #0ea5e9, orange and graphite",
+      "angular F84 emblem",
+      "Diamonds recruit heroes and upgrade futuristic gear")),
+    (("mobile legends", "موبايل ليجند", "موبايل ليجيند", "mlbb"),
+     ("Mobile Legends Bang Bang",
+      " legendary 5v5 mobile MOBA arena",
+      "blue-gold knight crest, crystal diamonds, epic lane battleground, hero statues",
+      "royal blue #2563eb and champion gold",
+      "regal ML crest",
+      "Diamonds buy heroes, epic skins and emblem upgrades")),
+    (("ea fc", "فيفا", "fc mobile", "fc 24", "fc 25", "fc26"),
+     ("EA Sports FC Mobile",
+      "the official mobile football simulation",
+      "packed stadium at night, green pitch light beams, golden football, trophy confetti",
+      "pitch green #16a34a, white and gold",
+      "bold FC monogram in a shield",
+      "FC Points open star packs and sign football legends")),
+    (("efootball", "اي فوتبول", "إي فوتبول", "ايفوتبول"),
+     ("eFootball",
+      "Konami's free football simulation",
+      "floodlit stadium, dynamic striker kick, blue energy ribbons",
+      "electric blue #0ea5e9 and white",
+      "sleek eFootball wordmark",
+      "Coins sign Dream Team epics and legends")),
+    (("roblox", "روبلوكس"),
+     ("Roblox",
+      "blocky user-created-games universe",
+      "tilted square logo hole, blocky avatar builders, floating cubes, green Robux bills",
+      "crimson #e11d48, dark grey and money green",
+      "iconic tilted-square mark",
+      "Robux spend on avatar items, game passes and animations")),
+    (("honkai", "هونكاي"),
+     ("Honkai Star Rail",
+      "HoYoverse space-fantasy turn-based RPG",
+      "astral express train flying through galaxies, starry rail tracks, warp portals",
+      "lavender #a78bfa over midnight blue",
+      "elegant H emblem with cosmic rings",
+      "Oneiric Shards fund warp tickets for 5-star characters")),
+    (("genshin", "جينشن", "غينشن"),
+     ("Genshin Impact",
+      "open-world elemental action RPG of Teyvat",
+      "glowing elemental stars, teal wind glider wings, floating islands, ancient statues",
+      "sky teal #38bdf8, white and deep blue",
+      "starry Genshin gate emblem",
+      "Genesis Crystals convert to wishes for heroes and weapons")),
+    (("ludo", "لودو"),
+     ("Ludo",
+      "the classic family board game of tokens and dice",
+      "giant rolling dice, red yellow green blue tokens racing home, playful board",
+      "warm amber #f59e0b with classic four colors",
+      "cheerful LUDO lettering",
+      "Coins and gems buy arenas, dice skins and quick matches")),
+    (("jawaker", "جواكر"),
+     ("Jawaker",
+      "the Arab world's cards and board games hub (tarneeb,sehha...)",
+      "playing cards fan, golden card suits, VIP green table, token piles",
+      "emerald #10b981 and gold",
+      "rounded J mark in green",
+      "Tokens enter VIP rooms, tournaments and exclusive tables")),
+    (("8 ball", "8ball", "بلياردو", "pool"),
+     ("8 Ball Pool",
+      "the classic mobile billiards duel",
+      "black 8-ball on green felt, crossed cues, chalk dust, neon arcade frame",
+      "felt green with black-and-white ball contrast",
+      "bold number-8 emblem",
+      "Coins and cash enter high-stake matches and cue upgrades")),
+    (("minecraft", "ماينكرافت"),
+     ("Minecraft",
+      "the blocky sandbox of infinite building",
+      "grass dirt blocks, diamond pickaxe, creeper face, torch-lit caves",
+      "creeper green #65a30d and earthy brown",
+      "cracked-stone MINECRAFT lettering",
+      "Minecoins unlock skins, texture packs and adventure maps")),
+    (("itunes", "آيتونز"),
+     ("iTunes / Apple Gift Card",
+      "Apple credit for apps, games and subscriptions",
+      "pink-red musical note, glowing gift card, app icons orbit",
+      "Apple pink-red #fa2d48 on dark",
+      "musical-note gift emblem",
+      "credit tops up Apple ID for games, iCloud and subscriptions")),
+    (("google play", "غوغل بلاي", "جوجل بلاي"),
+     ("Google Play",
+      "Android credit for games and apps",
+      "colorful triangle play button (blue green yellow red), gift card glow",
+      "play-store multicolor on dark",
+      "triangle play emblem",
+      "credit buys diamonds, UC and premium apps directly")),
+    (("playstation", "بلايستيشن", "بلاي ستيشن", "psn"),
+     ("PlayStation Store",
+      "Sony gaming credit for PS4 and PS5",
+      "blue galaxy with triangle circle cross square symbols, DualSense controller",
+      "PlayStation blue #0070d1",
+      "iconic PS shapes emblem",
+      "wallet top-up buys games, PS Plus and add-ons")),
+    (("xbox", "اكس بوكس", "إكس بوكس", "game pass"),
+     ("Xbox",
+      "Microsoft gaming world with Game Pass",
+      "glowing green X sphere, controller, game library wall",
+      "Xbox green #107c10 on black",
+      "luminous X orb emblem",
+      "credit funds Game Pass, games and in-game content")),
+    (("steam", "ستيم"),
+     ("Steam Wallet",
+      "PC gaming credit for thousands of games",
+      "dark steel gear-piston arm, wallet code card, game covers collage",
+      "steel blue-grey #1b2838 with pale blue",
+      "mechanical arm emblem",
+      "wallet codes buy games, skins and DLCs")),
+    (("netflix", "نتفلكس"),
+     ("Netflix",
+      "world-leading movie and series streaming",
+      "red N ribbon over cinematic film glow, popcorn and premiere lights",
+      "signature red #e50914 on black",
+      "tall red N emblem",
+      "gift cards extend premium viewing plans")),
+    (("shahid", "شاهد"),
+     ("Shahid VIP",
+      "Arabic series and cinema streaming",
+      "teal play glow with Arabic drama spotlights, cinema curtains",
+      "teal #00b8a9 on dark",
+      "modern S emblem",
+      "VIP subscription unlocks exclusive series ad-free")),
+    (("disney", "ديزني"),
+     ("Disney+",
+      "magic streaming of Disney, Marvel and Star Wars",
+      "blue arch with sparkling stars, castle silhouette, heroes collage",
+      "magic blue #113ccf with starlight",
+      "starry D+ arch emblem",
+      "subscription opens the full magic library")),
+    (("spotify", "سبوتفاي"),
+     ("Spotify Premium",
+      "music streaming without limits",
+      "green circle of pulsing sound waves, concert lights, floating notes",
+      "vivid green #1db954 on black",
+      "waves-in-circle emblem",
+      "Premium removes ads with offline downloads")),
+    (("youtube", "يوتيوب"),
+     ("YouTube Premium",
+      "ad-free video and music streaming",
+      "red play button over dark cinema glow, creator studio vibes",
+      "pure red #ff0000 on black",
+      "rounded red play emblem",
+      "Premium removes ads with background play")),
+    (("tiktok", "تيك توك"),
+     ("TikTok",
+      "short-video platform with live gifts and coins",
+      "black musical note with cyan-pink glitch, golden coins rain, stage spotlights",
+      "black with neon cyan #25f4ee and pink",
+      "glitch note emblem",
+      "Coins recharge funds live gifts and promotions")),
+    (("whatsapp", "واتساب"),
+     ("WhatsApp",
+      "instant messaging and virtual numbers",
+      "green chat bubble with phone handset, floating message ticks, SIM card",
+      "WhatsApp green #25d366",
+      "phone-in-bubble emblem",
+      "numbers activate accounts and verifications worldwide")),
+    (("telegram", "تيليجرام", "تليجرام"),
+     ("Telegram",
+      "cloud messaging with stars and premium",
+      "blue paper plane flying over clouds, golden stars trail",
+      "Telegram blue #229ed9",
+      "paper-plane emblem",
+      "Stars and Premium unlock gifts, stories and extra limits")),
+    (("instagram", "انست", "انستغرام"),
+     ("Instagram growth services",
+      "followers, likes and views boosts",
+      "gradient camera glyph, hearts storm, rising follower chart",
+      "pink-purple-orange gradient",
+      "camera emblem",
+      "packages grow followers, likes and reel views fast")),
+    (("visa", "فيزا"),
+     ("Visa payment card",
+      "global online payment top-up",
+      "navy-gold premium bank card with chip, secure lock glow",
+      "deep navy #1a1f71 and gold",
+      "italic VISA lettering",
+      "credit enables secure worldwide purchases")),
+]
+
+
+def _brand_profile(name):
+    """يرجع ملف البراند المطابق أو None."""
+    low = (name or "").lower()
+    for keys, prof in BRAND_PROFILES:
+        for k in keys:
+            if k and (k in low or k in (name or "")):
+                return prof
+    return None
+
+
+def describe_brand(name):
+    """وصف إنجليزي غني للـ AI: ما هو المنتج/اللعبة، دوره، شعاره وألوانه وعناصره.
+    يرجع '' للمنتجات غير المعروفة (يُستخدم describe_subject بدلاً منه)."""
+    prof = _brand_profile(name)
+    if not prof:
+        return ""
+    official, kind, visuals, colors, emblem, role = prof
+    return (f"{official} — {kind}. Iconic visuals: {visuals}. "
+            f"Official colors: {colors}. Logo: {emblem}. Role: {role}.")
+
+
+def describe_subject(name):
+    """وصف بصري ذكي للمنتجات غير المعروفة: يستنتج نوع المحتوى
+    (عملة/اشتراك/أرقام/متابعين...) ويصفه للـ AI بدقة."""
+    low = (name or "").lower()
+    if any(k in low for k in ("uc", "شدات")):
+        item = "shiny golden UC coins piles with military glow"
+    elif any(k in low for k in ("diamond", "diamonds", "جواهر", "جوهرة", "💎", "الماس")):
+        item = "sparkling blue-white diamond crystals rain"
+    elif any(k in low for k in ("gold", "ذهب", "ذهبي", "كوينز ذهب")):
+        item = "gleaming gold bars and coins stacks"
+    elif any(k in low for k in ("coin", "coins", "كوين", "كوينز", "عملات", "نقود")):
+        item = "glowing game coins fountain"
+    elif any(k in low for k in ("point", "points", "نقاط", "نقطة")):
+        item = "luminous points tokens orbiting"
+    elif any(k in low for k in ("follower", "followers", "متابع", "متابعين", "مشترك")):
+        item = "crowd of follower avatars with a steep rising growth chart"
+    elif any(k in low for k in ("like", "likes", "لايك", "لايكات", "اعجاب")):
+        item = "storm of glossy red hearts and thumbs-up icons"
+    elif any(k in low for k in ("view", "views", "مشاهد", "مشاهدات")):
+        item = "play-button counters exploding upward"
+    elif any(k in low for k in ("subscri", "اشتراك", "عضوية", "بريميوم", "premium", "vip")):
+        item = "luxurious premium membership card with golden seal"
+    elif any(k in low for k in ("number", "numbers", "رقم", "ارقام", "أرقام", "sim", "شريحة")):
+        item = "modern SIM cards and smartphones with signal waves"
+    elif any(k in low for k in ("card", "cards", "بطاقة", "بطاقات", "gift", "هدية", "كود", "voucher")):
+        item = "elegant glowing gift card with ribbon and code sparks"
+    elif any(k in low for k in ("pass", "royale", "الباس", "تذكرة", "season")):
+        item = "golden season-pass ticket with confetti burst"
+    else:
+        item = "premium digital voucher chest with glowing treasures"
+    return f"Showcase content: {item}."
+
+
 def short_name(name, limit=22):
     name = (name or "").strip()
     return name if len(name) <= limit else name[:limit - 1] + "…"
@@ -471,11 +752,16 @@ NEGATIVE_PROMPT = ("arabic text, arabic letters, blurry text, misspelled text, "
 
 def build_precise_prompt(kind, name):
     """برومبت إنجليزي دقيق يتناسق 100% مع هوية المتجر.
-    kind: product | section | subsection | category | banner."""
+    kind: product | section | subsection | category | banner.
+    يُرفق وصف البراند الغني (ما هو + شعاره + دوره) ليفهمه الـ AI بدقة."""
     en = to_english(name)
     mark = official_mark(name or "")
     brand_line = (f"with official {mark[0]} brand emblem badge, " if mark
                   else "with a golden circular emblem badge containing a game icon, ")
+    profile = describe_brand(name or "")
+    subject_desc = describe_subject(name or "")
+    context = " ".join(x for x in (profile, subject_desc) if x)
+    context = f" Brand context: {context}" if context else ""
     subject = {
         "product": f"game top-up product banner for {en}",
         "section": f"game store category banner for {en}",
@@ -483,7 +769,7 @@ def build_precise_prompt(kind, name):
         "category": f"digital package artwork for {en}",
         "banner": f"promotional hero banner for {en}",
     }.get(kind or "product", f"game store artwork for {en}")
-    return (f"{subject}, {brand_line}"
+    return (f"{subject}.{context} {brand_line}"
             f'large centered English title "{en}", {STYLE_LOCK}')
 
 

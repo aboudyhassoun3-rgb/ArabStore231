@@ -256,6 +256,8 @@
           <div class="field"><label>نص نافذة الترحيب</label><textarea id="settingsPopupText" rows="3" placeholder="مثال: اهلاً وسهلاً فيكم بموقعنا! تابعونا على قناتنا..." style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); resize:vertical;"></textarea></div>
           <div class="field"><label>رابط API الذكاء الاصطناعي للصور</label><input type="text" id="settingsAiUrl" placeholder="https://.../api/public/generate?key=...&prompt=" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);"></div>
           <div class="field"><label>مفتاح API (اختياري إذا كان داخل الرابط)</label><input type="text" id="settingsAiKey" placeholder="bai_live_..." style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);"></div>
+          <div class="field"><label>نوع API الصور</label><select id="settingsAiType" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);"><option value="custom">مخصص (صيغة المتجر الحالية)</option><option value="openai">OpenAI متوافق (DALL-E)</option><option value="pollinations">Pollinations مجاني (بلا مفتاح)</option></select></div>
+          <div class="field"><label>موديل الصور (لنوع OpenAI فقط)</label><input type="text" id="settingsAiModel" placeholder="dall-e-3" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); direction:ltr;"></div>
           <div class="field"><label>قالب البرومبت الموحّد ({name} = اسم العنصر)</label><textarea id="settingsAiPrompt" rows="3" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); resize:vertical;"></textarea></div>
           <div class="field"><label>برومبت خاص بالمنتجات ({name} = اسم المنتج)</label><textarea id="settingsAiPromptProduct" rows="3" placeholder="اتركه فاضي لاستخدام القالب الموحّد" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); resize:vertical;"></textarea></div>
           <div class="field"><label>برومبت خاص بالأقسام والأقسام الفرعية ({name} = اسم القسم)</label><textarea id="settingsAiPromptSection" rows="3" placeholder="اتركه فاضي لاستخدام القالب الموحّد" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); resize:vertical;"></textarea></div>
@@ -1076,6 +1078,6 @@
     }
   });
 </script>
-<script src="js/admin-data.js?v=11"></script>
+<script src="js/admin-data.js?v=12"></script>
 </body>
 </html>

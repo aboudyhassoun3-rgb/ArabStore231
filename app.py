@@ -365,7 +365,8 @@ def init_db():
                     "welcome_popup_text": "أهلاً بك في ARAB STORE ✨",
                     "welcome_message": "أهلاً بك في ARAB STORE ✨",
                     "logo_image": "", "dev_logo": "", "app_icon": "", "notif_icon": "",
-                    "ai_image_api_url": "", "ai_image_api_key": "",
+                     "ai_image_api_url": "", "ai_image_api_key": "",
+                     "ai_image_api_type": "custom", "ai_image_model": "dall-e-3",
                      "ai_image_prompt_template": "Epic luxury dark gaming store hero artwork for {name}, cinematic AAA game key art, dramatic volumetric lighting, deep navy background #0b0f19 with red neon glow accents #ff1a3c and rich gold highlights #ffc24b, premium glassmorphism showcase card in the center, floating golden particles and light streaks, small gold AS store logo badge in the top-left corner, large bold centered uppercase English title \"{name}\", ultra detailed, sharp focus, high contrast, 8k commercial quality, absolutely no Arabic text, no watermark",
                      "ai_image_prompt_product": "Explosive 3D game top-up product banner for {name}, iconic game elements bursting toward viewer (glowing gems, gold coins, energy crystals, lightning), dramatic rim lighting, deep navy background #0b0f19, red neon glow #ff1a3c, gold highlights #ffc24b, premium glassmorphism pedestal, golden circular emblem badge, floating particles, motion energy trails, giant bold centered uppercase English title \"{name}\", hyper detailed AAA game splash art, 8k, absolutely no Arabic text, no watermark",
                      "ai_image_prompt_section": "Vast panoramic game store category banner for {name}, epic game universe landscape with glowing showcases and floating game items, atmospheric depth with foreground bokeh, deep navy background #0b0f19, red neon glow #ff1a3c, gold highlights #ffc24b, premium glassmorphism panel, small gold AS store logo badge top-left, large bold centered uppercase English title \"{name}\", cinematic wide composition, ultra detailed, 8k, absolutely no Arabic text, no watermark",
@@ -4557,6 +4558,39 @@ def _ai_prompt_for(kind, name):
         from branding import image_prompt_payload as _pp
         return _pp(kind or "product", name or "product")
 
+def _ai_image_request(url, key, prompt, negative, api_type="", model=""):
+    """إرسال طلب توليد صورة حسب نوع الـ API المضبوط من اللوحة:
+    - custom (الافتراضي): POST {prompt, negative_prompt, key} — متوافق مع إعدادك الحالي.
+    - openai: POST بصيغة OpenAI (DALL-E) مع Bearer — يرجع رابطاً مباشراً.
+    - pollinations: GET مجاني بلا مفتاح — الرابط نفسه هو الصورة.
+    يرجع (نجح؟, رابط الصورة, وصف الخطأ)."""
+    import requests as _rq
+    t = (api_type or "custom").strip().lower()
+    if t == "pollinations":
+        import urllib.parse as _up
+        base = (url or "https://image.pollinations.ai/prompt").strip().rstrip("/")
+        full = f"{base}/{_up.quote((prompt or '')[:1500])}?{_up.urlencode({'width': 1024, 'height': 1024, 'nologo': 'true', 'model': 'flux'})}"
+        try:
+            r = _rq.get(full, timeout=60)
+        except Exception as e:
+            return False, "", f"تعذّر الاتصال: {e}"
+        if r.ok and (r.headers.get("Content-Type") or "").startswith("image/"):
+            return True, full, ""
+        return False, "", f"رفض الطلب (رمز {r.status_code})"
+    if t == "openai":
+        try:
+            r = _rq.post(url, headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+                         json={"model": (model or "dall-e-3"), "prompt": prompt,
+                               "size": "1024x1024", "response_format": "url"}, timeout=60)
+        except Exception as e:
+            return False, "", f"تعذّر الاتصال: {e}"
+        return _extract_ai_image(r)
+    try:
+        r = _rq.post(url, json={"prompt": prompt, "negative_prompt": negative, "key": key}, timeout=25)
+    except Exception as e:
+        return False, "", f"تعذّر الاتصال: {e}"
+    return _extract_ai_image(r)
+
 @app.post("/api/admin/catalog/brand-images/bulk")
 @require_admin
 def adm_brand_images_bulk():
@@ -4599,8 +4633,9 @@ def adm_brand_images_bulk():
     for pid, name, _img in batch:
         try:
             prompt_en, negative_en = _ai_prompt_for("product", name or "product")
-            r = _rq.post(url, json={"prompt": prompt_en, "negative_prompt": negative_en, "key": key}, timeout=20)
-            ok, img, err = _extract_ai_image(r)
+            ok, img, err = _ai_image_request(url, key, prompt_en, negative_en,
+                                            get_setting("ai_image_api_type", "custom"),
+                                            get_setting("ai_image_model", ""))
         except Exception as e:
             ok, img, err = False, "", f"تعذّر الاتصال: {e}"
         if ok and img:
@@ -4685,7 +4720,8 @@ def ai_gen():
     except Exception:
         name_en = (name or "store banner")
     brand_info = {"name": brand_en, "monogram": brand_mono} if brand_en else None
-    if url and key:
+    _atype = get_setting("ai_image_api_type", "custom")
+    if url and (key or _atype == "pollinations"):
         # التوليد عبر API الخارجي أولاً — بالبرومبت الدقيق الإنجليزي الموحد
         custom = (b.get("prompt") or "").strip()
         if custom:
@@ -4694,9 +4730,8 @@ def ai_gen():
             # برومبت المنتجات/الأقسام المخصص أولاً ثم العام ثم المدمج
             prompt, negative_en = _ai_prompt_for(kind, name)
         try:
-            import requests as _rq
-            r = _rq.post(url, json={"prompt": prompt, "negative_prompt": negative_en, "key": key}, timeout=25)
-            ok, img, err_detail = _extract_ai_image(r)
+            ok, img, err_detail = _ai_image_request(url, key, prompt, negative_en, _atype,
+                                                   get_setting("ai_image_model", ""))
             if ok:
                 final, stamped, note = fetch_stamp_save(img)
                 if stamped:
@@ -4734,6 +4769,7 @@ def _extract_ai_image(r):
         lambda x: x.get("image_url"), lambda x: x.get("image"), lambda x: x.get("url"),
         lambda x: (x.get("data") or {}).get("url") if isinstance(x.get("data"), dict) else None,
         lambda x: (x.get("data") or {}).get("image") if isinstance(x.get("data"), dict) else None,
+        lambda x: ((x.get("data") or [None])[0] or {}).get("url") if isinstance(x.get("data"), list) else None,
         lambda x: (x.get("result") or {}).get("url") if isinstance(x.get("result"), dict) else None,
         lambda x: (x.get("images") or [None])[0] if isinstance(x.get("images"), list) else None,
         lambda x: (x.get("output") or [None])[0] if isinstance(x.get("output"), list) else None,
