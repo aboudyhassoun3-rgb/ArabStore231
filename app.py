@@ -2887,7 +2887,7 @@ def _ai_system_prompt():
             "4) لتتبع طلب: وجّه المستخدم لصفحة طلباتي.\n"
             "5) لشحن الرصيد: اذكر طرق الشحن المتاحة.\n"
             "6) إن احتاج المستخدم الإدارة (مشكلة دفع، طلب عالق، استفسار خاص): أعطه رقم/رابط الدعم.\n"
-            "7) روابط المنتجات بهذا الشكل: /product.html?id=رقم_المنتج.\n"
+            "7) روابط المنتجات نسبية فقط بهذا الشكل تماماً: /product.html?id=7 — ممنوع منعاً باتاً كتابة أي دومين (لا https ولا www) وممنوع اختراع روابط.\n"
             "8) إجابات قصيرة مركزة (5 أسطر كحد أقصى عادة).\n"
             "9) الوسوم الخفية إلزامية: كلما ذكرت منتجاً بعينه من القائمة يجب أن ينتهي ردك بسطر وسوم — انسخ الأرقام من القائمة حصراً ولا تخترعها ولا تشرحها أبداً:\n"
             "   - استفسار (وين/في/بدي شوف/أريد رقم...): [PRODUCT:12]\n"
@@ -2926,50 +2926,97 @@ def _strip_thinking(text):
     t = _re.sub(r"<\s*/?\s*(think|thinking|thought|reasoning)[^>]*>", "", t, flags=_re.IGNORECASE)
     return t.strip()
 
-def _ai_extract_cards(reply):
-    """يستخرج وسوم [PRODUCT:id] و[BUY:pid:skuid] من الرد ويتحقق منها بقاعدة البيانات،
-    ثم يحذفها من النص. يرجع (نص نظيف, بطاقات). الوسوم الخاطئة تُتجاهل بصمت."""
+def _ai_extract_cards(reply, user_msg=""):
+    """يستخرج وسوم [PRODUCT:id] و[BUY:pid:skuid] وروابط الماركداون [نص](url?id=N)
+    من الرد ويتحقق منها بقاعدة البيانات، ثم يحذفها من النص.
+    - الآيدي الصحيح → بطاقة (عرض، أو شراء عند نية الشراء).
+    - الآيدي المخترع/الخاطئ → يُحذف رابطه نهائياً (نبقي النص فقط) فلا يظهر دومين خاطئ أبداً.
+    يرجع (نص نظيف, بطاقات)."""
     import re as _re
     cards = []
     try:
-        pids = _re.findall(r"\[PRODUCT\s*:\s*(\d+)\]", reply or "")
-        buys = _re.findall(r"\[BUY\s*:\s*(\d+)\s*:\s*([A-Za-z0-9\-_]+)\]", reply or "")
-        if not pids and not buys:
-            return reply, []
+        text = reply or ""
+        pids = _re.findall(r"\[PRODUCT\s*:\s*(\d+)\]", text)
+        buys = _re.findall(r"\[BUY\s*:\s*(\d+)\s*:\s*([A-Za-z0-9\-_]+)\]", text)
+        # روابط ماركداون لأي دومين: [نص](https://..../product.html?id=N)
+        md_ids = [a or b for _, _, a, b in
+                  _re.findall(r"\[([^\]]+)\]\(\s*(https?://[^\s)]*?product\.html\?id=(\d+)[^\s)]*|/product\.html\?id=(\d+)[^\s)]*)\s*\)", text)]
+        if not pids and not buys and not md_ids:
+            # تنظيف احترازي لأي رابط منتج بدومين خارجي حتى بدون ماركداون
+            return _ai_scrub_links(text), []
+        buy_intent = any(k in (user_msg or "") for k in _AI_BUY_WORDS)
         with get_db() as db:
+            try: valid_ids = {str(r[0]) for r in db.execute("SELECT id FROM products").fetchall()}
+            except Exception: valid_ids = set()
+            # 1) إصلاح روابط الماركداون: الصحيح → نسبي، المخترع → نحذف الرابط ونبقي النص
+            def _fix_md(m):
+                label, url = m.group(1), m.group(2)
+                mm = _re.search(r"product\.html\?id=(\d+)", url or "")
+                pid = mm.group(1) if mm else ""
+                if pid and pid in valid_ids:
+                    return f"[{label}](/product.html?id={pid})"
+                return label
+            text = _re.sub(r"\[([^\]]+)\]\(\s*(https?://[^\s)]+|/product\.html\?[^\s)]*)\s*\)", _fix_md, text)
+            # 2) أي رابط منتج عارٍ بدومين خارجي → نسبي إن صح، محذوف إن اختُرع
+            def _fix_bare(m):
+                mm = _re.search(r"id=(\d+)", m.group(0))
+                pid = mm.group(1) if mm else ""
+                return f"/product.html?id={pid}" if pid and pid in valid_ids else ""
+            text = _re.sub(r"https?://[^\s)]*product\.html\?id=\d+[^\s)]*", _fix_bare, text)
             seen = set()
-            # وسوم الشراء أولاً — تحدد الباقة بدقة، ثم وسوم العرض للبقية
             for pid, skref in buys:
                 try: pidn = int(pid)
                 except Exception: continue
-                if pidn in seen: continue
+                if pidn in seen or str(pidn) not in valid_ids: continue
                 seen.add(pidn)
-                pr = db.execute("SELECT id,name FROM products WHERE id=?", (pidn,)).fetchone()
-                if not pr: continue
                 try: sk = db.execute("SELECT id,public_id,name,price,stock_qty FROM skus WHERE product_id=? AND (CAST(id AS TEXT)=? OR public_id=?)", (pidn, skref, skref)).fetchone()
                 except Exception: sk = None
                 if not sk: continue
-                cards.append({"product_id": pr[0], "product_name": pr[1],
+                pr = db.execute("SELECT name FROM products WHERE id=?", (pidn,)).fetchone()
+                cards.append({"product_id": pidn, "product_name": pr[0] if pr else "",
                               "sku_id": sk[1] or str(sk[0]), "mode": "buy",
                               "sku_name": sk[2], "price": float(sk[3] or 0),
                               "available": bool(sk[4] is None or int(sk[4]) > 0)})
-            for pid in pids:
+            for pid in list(pids) + md_ids:
                 try: pidn = int(pid)
                 except Exception: continue
-                if pidn in seen: continue
+                if pidn in seen or str(pidn) not in valid_ids: continue
                 seen.add(pidn)
-                pr = db.execute("SELECT id,name FROM products WHERE id=?", (pidn,)).fetchone()
+                pr = db.execute("SELECT name FROM products WHERE id=?", (pidn,)).fetchone()
                 if not pr: continue
                 try: sk = db.execute("SELECT id,public_id,name,price,stock_qty FROM skus WHERE product_id=? ORDER BY price LIMIT 1", (pidn,)).fetchone()
                 except Exception: sk = None
-                cards.append({"product_id": pr[0], "product_name": pr[1],
-                              "sku_id": (sk[1] or str(sk[0])) if sk else "", "mode": "view",
+                mode = "buy" if (buy_intent and sk) else "view"
+                cards.append({"product_id": pidn, "product_name": pr[0],
+                              "sku_id": (sk[1] or str(sk[0])) if sk else "", "mode": mode,
                               "sku_name": sk[2] if sk else "", "price": float(sk[3] or 0) if sk else 0,
                               "available": bool(sk and (sk[4] is None or int(sk[4]) > 0))})
-        clean = _re.sub(r"\[(PRODUCT\s*:\s*\d+|BUY\s*:\s*\d+\s*:\s*[A-Za-z0-9\-_]+)\]", "", reply or "")
+        clean = _re.sub(r"\[(PRODUCT\s*:\s*\d+|BUY\s*:\s*\d+\s*:\s*[A-Za-z0-9\-_]+)\]", "", text)
         return clean.strip(), cards[:4]
     except Exception:
         return reply, []
+
+def _ai_scrub_links(text):
+    """يحذف أي رابط منتج بدومين خارجي من النص (حماية حتى بدون بطاقات)."""
+    import re as _re
+    try:
+        with get_db() as db:
+            try: valid_ids = {str(r[0]) for r in db.execute("SELECT id FROM products").fetchall()}
+            except Exception: return text
+        def _fix_md(m):
+            label, url = m.group(1), m.group(2)
+            mm = _re.search(r"product\.html\?id=(\d+)", url or "")
+            pid = mm.group(1) if mm else ""
+            return f"[{label}](/product.html?id={pid})" if pid and pid in valid_ids else label
+        text = _re.sub(r"\[([^\]]+)\]\(\s*(https?://[^\s)]+|/product\.html\?[^\s)]*)\s*\)", _fix_md, text)
+        def _fix_bare(m):
+            mm = _re.search(r"id=(\d+)", m.group(0))
+            pid = mm.group(1) if mm else ""
+            return f"/product.html?id={pid}" if pid and pid in valid_ids else ""
+        text = _re.sub(r"https?://[^\s)]*product\.html\?id=\d+[^\s)]*", _fix_bare, text)
+    except Exception:
+        pass
+    return text
 
 _AI_BUY_WORDS = ("شراء", "اشتري", "اشترى", "اشتر", "اطلب", "أطلب", "احجز", "buy", "purchase", "order", "checkout")
 _AI_STOP_WORDS = {"رقم", "ارقام", "أرقام", "منتج", "منتجات", "قسم", "السعر", "سعر", "متوفر", "متوفرة",
@@ -3075,7 +3122,7 @@ def ai_agent_chat():
     if not reply:
         reply = "لم أفهم سؤالك تماماً — جرّب تسألني عن منتج أو سعر أو طريقة شحن 🤖"
     reply = _strip_thinking(reply)
-    reply, cards = _ai_extract_cards(reply)
+    reply, cards = _ai_extract_cards(reply, msg)
     if not cards:
         # النموذج تجاهل الوسوم — نطابق المنتج من الكلام ونرفق بطاقته (عرض/شراء حسب النية)
         auto = _ai_autocard(msg, reply)
