@@ -1308,7 +1308,11 @@ def skus():
     r = rate(); disc = 0
     u = optional_user()
     if u:
-        try: uid = int(u["site_user_id"] if "site_user_id" in u.keys() else u[4]); t = tier_of(uid); disc = t[1] if t else 0
+        try:
+            uid = int(u["site_user_id"] if "site_user_id" in u.keys() else u[4])
+            with get_db() as _db:
+                _pr = _db.execute("SELECT category FROM products WHERE id=?", (pid,)).fetchone()
+            t = tier_section_discount(uid, (_pr[0] if _pr else "") or ""); disc = t[1] if t else 0
         except Exception: pass
     with get_db() as db:
         try: rows = db.execute("SELECT id,name,price,image,stock_qty,requires_id,public_id,min_qty,max_qty,unit_qty,type FROM skus WHERE product_id=?", (pid,)).fetchall()
@@ -2854,14 +2858,14 @@ def _ai_store_context():
                 pass
             prods = db.execute("SELECT id,name,category FROM products ORDER BY category,id").fetchall()
             for p in prods:
-                try: skus = db.execute("SELECT name,price,stock_qty,requires_id FROM skus WHERE product_id=?", (p[0],)).fetchall()
+                try: skus = db.execute("SELECT id,name,price,stock_qty,requires_id,public_id FROM skus WHERE product_id=?", (p[0],)).fetchall()
                 except Exception: skus = []
                 if not skus:
                     continue
                 parts = []
                 for s in skus:
-                    avail = "متوفر ✅" if (s[2] is None or int(s[2]) > 0) else "نافد ❌"
-                    parts.append(f"{s[0]}: ${float(s[1] or 0):.2f} ({avail})")
+                    avail = "✅" if (s[3] is None or int(s[3]) > 0) else "❌"
+                    parts.append(f"{s[1]}: ${float(s[2] or 0):.2f}{avail} [BUY {p[0]}:{s[5] or s[0]}]")
                 lines.append(f"[{p[2] or 'عام'}] {p[1]} (id:{p[0]}): " + " | ".join(parts))
         text = "\n".join(lines)
         if len(text) > 7000:
@@ -2884,7 +2888,8 @@ def _ai_system_prompt():
             "5) لشحن الرصيد: اذكر طرق الشحن المتاحة.\n"
             "6) إن احتاج المستخدم الإدارة (مشكلة دفع، طلب عالق، استفسار خاص): أعطه رقم/رابط الدعم.\n"
             "7) روابط المنتجات بهذا الشكل: /product.html?id=رقم_المنتج.\n"
-            "8) إجابات قصيرة مركزة (5 أسطر كحد أقصى عادة).\n")
+            "8) إجابات قصيرة مركزة (5 أسطر كحد أقصى عادة).\n"
+            "9) عند ترشيح منتجات بعينها أضف سطراً أخيراً فيه وسوم خفية فقط بهذا الشكل: [PRODUCT:7] لزر العرض، واختيارياً [BUY:7:45] لزر الشراء المباشر لأفضل باقة — انسخ الأرقام من القائمة حصراً ولا تخترع أرقاماً، ولا تشرح الوسوم للمستخدم فهي لا تظهر له.")
     if custom:
         base = f"تعليمات الإدارة (أولوية قصوى):\n{custom}\n\n" + base
     return base + "\n=== بيانات المتجر الحية ===\n" + ctx
@@ -2909,6 +2914,59 @@ def _ai_call_llm(messages):
         return (d["choices"][0]["message"]["content"] or "").strip()
     except Exception:
         raise ValueError("bad-response")
+
+def _strip_thinking(text):
+    """يحذف كتل التفكير (<think>...) التي ترسلها بعض النماذج مع الرد — دون أي تأثير آخر."""
+    import re as _re
+    t = text or ""
+    t = _re.sub(r"<\s*(think|thinking|thought|reasoning)[^>]*>[\s\S]*?<\s*/\s*\1\s*>", "", t, flags=_re.IGNORECASE)
+    t = _re.sub(r"<\s*/?\s*(think|thinking|thought|reasoning)[^>]*>", "", t, flags=_re.IGNORECASE)
+    return t.strip()
+
+def _ai_extract_cards(reply):
+    """يستخرج وسوم [PRODUCT:id] و[BUY:pid:skuid] من الرد ويتحقق منها بقاعدة البيانات،
+    ثم يحذفها من النص. يرجع (نص نظيف, بطاقات). الوسوم الخاطئة تُتجاهل بصمت."""
+    import re as _re
+    cards = []
+    try:
+        pids = _re.findall(r"\[PRODUCT\s*:\s*(\d+)\]", reply or "")
+        buys = _re.findall(r"\[BUY\s*:\s*(\d+)\s*:\s*([A-Za-z0-9\-_]+)\]", reply or "")
+        if not pids and not buys:
+            return reply, []
+        with get_db() as db:
+            seen = set()
+            # وسوم الشراء أولاً — تحدد الباقة بدقة، ثم وسوم العرض للبقية
+            for pid, skref in buys:
+                try: pidn = int(pid)
+                except Exception: continue
+                if pidn in seen: continue
+                seen.add(pidn)
+                pr = db.execute("SELECT id,name FROM products WHERE id=?", (pidn,)).fetchone()
+                if not pr: continue
+                try: sk = db.execute("SELECT id,public_id,name,price,stock_qty FROM skus WHERE product_id=? AND (CAST(id AS TEXT)=? OR public_id=?)", (pidn, skref, skref)).fetchone()
+                except Exception: sk = None
+                if not sk: continue
+                cards.append({"product_id": pr[0], "product_name": pr[1],
+                              "sku_id": sk[1] or str(sk[0]),
+                              "sku_name": sk[2], "price": float(sk[3] or 0),
+                              "available": bool(sk[4] is None or int(sk[4]) > 0)})
+            for pid in pids:
+                try: pidn = int(pid)
+                except Exception: continue
+                if pidn in seen: continue
+                seen.add(pidn)
+                pr = db.execute("SELECT id,name FROM products WHERE id=?", (pidn,)).fetchone()
+                if not pr: continue
+                try: sk = db.execute("SELECT id,public_id,name,price,stock_qty FROM skus WHERE product_id=? ORDER BY price LIMIT 1", (pidn,)).fetchone()
+                except Exception: sk = None
+                cards.append({"product_id": pr[0], "product_name": pr[1],
+                              "sku_id": (sk[1] or str(sk[0])) if sk else "",
+                              "sku_name": sk[2] if sk else "", "price": float(sk[3] or 0) if sk else 0,
+                              "available": bool(sk and (sk[4] is None or int(sk[4]) > 0))})
+        clean = _re.sub(r"\[(PRODUCT\s*:\s*\d+|BUY\s*:\s*\d+\s*:\s*[A-Za-z0-9\-_]+)\]", "", reply or "")
+        return clean.strip(), cards[:4]
+    except Exception:
+        return reply, []
 
 @app.get("/api/ai-agent/config")
 def ai_agent_config():
@@ -2954,10 +3012,12 @@ def ai_agent_chat():
         code = str(e)
         tg = get_setting("support_telegram", "https://t.me/aboudy2312")
         if code == "not-configured":
-            return jsonify({"reply": f"عذراً، المساعد قيد الإعداد حالياً 🛠️ تواصل مع الإدارة مباشرة: {tg}"})
-        return jsonify({"reply": f"عذراً، تعذّر الرد حالياً ⏳ حاول مجدداً أو تواصل مع الإدارة: {tg}"})
+            return jsonify({"reply": f"عذراً، المساعد قيد الإعداد حالياً 🛠️ تواصل مع الإدارة مباشرة: {tg}", "cards": []})
+        return jsonify({"reply": f"عذراً، تعذّر الرد حالياً ⏳ حاول مجدداً أو تواصل مع الإدارة: {tg}", "cards": []})
     if not reply:
         reply = "لم أفهم سؤالك تماماً — جرّب تسألني عن منتج أو سعر أو طريقة شحن 🤖"
+    reply = _strip_thinking(reply)
+    reply, cards = _ai_extract_cards(reply)
     # ذاكرة الوكيل: حفظ السؤال والرد لمراجعة الأدمن وتحسين البرومبت (لا يكسر الرد أبداً)
     try:
         with get_db() as db:
@@ -2966,7 +3026,7 @@ def ai_agent_chat():
             db.execute("DELETE FROM ai_memory WHERE id NOT IN (SELECT id FROM ai_memory ORDER BY id DESC LIMIT 300)")
     except Exception:
         pass
-    return jsonify({"reply": reply})
+    return jsonify({"reply": reply, "cards": cards})
 
 @app.get("/api/admin/ai-agent")
 @require_admin

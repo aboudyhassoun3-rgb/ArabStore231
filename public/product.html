@@ -9,7 +9,7 @@
 <link rel="apple-touch-icon" href="/site-icon">
 <meta name="theme-color" content="#e63946">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-<link rel="stylesheet" href="css/style.css?v=27">
+<link rel="stylesheet" href="css/style.css?v=28">
 </head>
 <body>
 
@@ -142,7 +142,7 @@
   </div>
 </div>
 
-<script src="js/app.js?v=9"></script>
+<script src="js/app.js?v=10"></script>
 <script>
   const ART_POOL = ["art-red","art-gold","art-purple","art-green","art-blue","art-pink"];
   function getParam(name){ return new URLSearchParams(location.search).get(name); }
@@ -203,6 +203,13 @@
     }
     document.getElementById("purchaseForm").style.display = "block";
     renderPackages();
+    // فتح مباشر من زر شراء الوكيل: ?id=N&buy=SKUID
+    const buyRef = getParam("buy");
+    if(buyRef){
+      const target = packages.find(p=> String(p.id) === String(buyRef) || String(p.public_id) === String(buyRef));
+      if(target && target.available !== false) setTimeout(()=> openBuySheet(target.id), 400);
+      history.replaceState(null, "", "/product.html?id=" + productId);
+    }
   }
 
   function pkgArt(p){
@@ -213,9 +220,11 @@
   function renderPackages(){
     document.getElementById("packagesList").innerHTML = packages.map((p,i)=>{
       const available = p.price_usd != null && p.price_usd >= 0 && p.available !== false;
+      // السعر القادم من السيرفر نهائي بعد الخصم — الأصلي يُستنتج للعرض فقط
+      const orig = (available && sectionDisc > 0) ? (p.price_usd / (1 - sectionDisc/100)) : null;
       const priceHtml = !available ? '—'
         : sectionDisc > 0
-          ? `<s style="color:var(--muted); font-size:11px; margin-left:6px;">${Currency.format(p.price_usd)}</s><b style="color:var(--gold);">${Currency.format(p.price_usd * (1 - sectionDisc/100))}</b> <span class="badge-vip" style="font-size:9px;">-${sectionDisc}%</span>`
+          ? `<s style="color:var(--muted); font-size:11px; margin-left:6px;">${Currency.format(orig)}</s><b style="color:var(--gold);">${Currency.format(p.price_usd)}</b> <span class="badge-vip" style="font-size:9px;">-${sectionDisc}%</span>`
           : Currency.format(p.price_usd);
       return `
       <div class="package-card ${available ? '' : 'unavailable'}">
@@ -308,8 +317,8 @@
 
   function updateBuySheetTotal(){
     if(!selected) return;
-    const full = selected.price_usd * qty / (selected.unit_qty || 1);
-    const total = full * (1 - (sectionDisc || 0) / 100);
+    // السعر نهائي بعد الخصم من السيرفر — لا نخصم مجدداً
+    const total = selected.price_usd * qty / (selected.unit_qty || 1);
     document.getElementById("bsTotal").textContent = Currency.format(total)
       + (sectionDisc > 0 ? ` (شامل خصم ${sectionDisc}%)` : "");
     const user = Store.user();

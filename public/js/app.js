@@ -257,7 +257,9 @@ function toggleAiChat(force){
 
 /* تنسيق جميل: عريض + قوائم + روابط + أسطر */
 function aiRender(text){
-  let h = String(text || "").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+  let h = String(text || "")
+    .replace(/<\s*\/?\s*(think|thinking|thought|reasoning)[^>]*>/gi, "") // إخفاء بقايا التفكير بالسجلات القديمة
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
   h = h.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
   const lines = h.split("\n");
   let out = "", inList = false;
@@ -280,14 +282,30 @@ function aiGetHistory(){
   try{ return JSON.parse(localStorage.getItem("aiChatHistory") || "[]"); }catch(e){ return []; }
 }
 function aiSetHistory(h){ localStorage.setItem("aiChatHistory", JSON.stringify(h.slice(-30))); }
-function aiPushMsg(role, content){
-  const h = aiGetHistory(); h.push({ role, content }); aiSetHistory(h);
+function aiPushMsg(role, content, cards){
+  const h = aiGetHistory(); h.push({ role, content, cards: cards || [] }); aiSetHistory(h);
+}
+function aiCardsHTML(cards){
+  if(!cards || !cards.length) return "";
+  return `<div class="ai-cards">` + cards.map(c=>{
+    const nm = String(c.product_name || "").replace(/&/g,"&amp;").replace(/</g,"&lt;");
+    const price = Number(c.price || 0);
+    const priceTxt = price > 0 ? " — $" + price.toFixed(2) : "";
+    const sku = String(c.sku_name || "").replace(/&/g,"&amp;").replace(/</g,"&lt;");
+    return `<div class="ai-card">
+      <div class="ai-card-info"><i class="fa-solid fa-box-open"></i><div><b>${nm}</b>${sku ? `<small>${sku}${priceTxt}</small>` : ""}</div></div>
+      <div class="ai-card-btns">
+        <a href="/product.html?id=${c.product_id}" class="ai-btn view"><i class="fa-solid fa-eye"></i> عرض المنتج</a>
+        ${c.sku_id ? `<a href="/product.html?id=${c.product_id}&buy=${encodeURIComponent(c.sku_id)}" class="ai-btn buy"><i class="fa-solid fa-cart-shopping"></i> شراء</a>` : ""}
+      </div>
+    </div>`;
+  }).join("") + `</div>`;
 }
 function renderAiHistory(){
   const body = document.getElementById("aiChatBody");
   if(!body) return;
   const h = aiGetHistory();
-  body.innerHTML = h.map(m=>`<div class="ai-msg ${m.role === "user" ? "user" : "agent"}">${m.role === "user" ? m.content.replace(/&/g,"&amp;").replace(/</g,"&lt;") : aiRender(m.content)}</div>`).join("");
+  body.innerHTML = h.map(m=>`<div class="ai-msg ${m.role === "user" ? "user" : "agent"}">${m.role === "user" ? m.content.replace(/&/g,"&amp;").replace(/</g,"&lt;") : aiRender(m.content)}</div>${m.role === "assistant" ? aiCardsHTML(m.cards) : ""}`).join("");
   body.scrollTop = body.scrollHeight;
 }
 function aiChipAsk(btn){ const inp = document.getElementById("aiChatInput"); if(inp){ inp.value = btn.textContent; aiSend(); } }
@@ -338,15 +356,16 @@ async function aiSend(){
   try{
     const headers = { "Content-Type":"application/json" };
     if(Store.token()) headers["Authorization"] = "Bearer " + Store.token();
+    const hist = aiGetHistory().slice(-8).map(m=>({ role: m.role, content: m.content }));
     const res = await fetch(API_BASE + "/ai-agent/chat", {
-      method:"POST", headers, body: JSON.stringify({ message: text, history: aiGetHistory().slice(-8) })
+      method:"POST", headers, body: JSON.stringify({ message: text, history: hist })
     });
     const data = await res.json().catch(()=>null);
-    let reply;
-    if(!res.ok) reply = (data && (data.message || data.reply)) || "عذراً، حاول مجدداً ⏳";
-    else reply = data.reply || "لم أفهم — جرّب صياغة أخرى 🤖";
+    let reply, cards = [];
+    if(!res.ok){ reply = (data && (data.message || data.reply)) || "عذراً، حاول مجدداً ⏳"; }
+    else{ reply = data.reply || "لم أفهم — جرّب صياغة أخرى 🤖"; cards = data.cards || []; }
     document.getElementById("aiTyping")?.remove();
-    aiPushMsg("assistant", reply);
+    aiPushMsg("assistant", reply, cards);
     renderAiHistory();
   }catch(err){
     document.getElementById("aiTyping")?.remove();

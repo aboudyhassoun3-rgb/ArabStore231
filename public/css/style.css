@@ -662,6 +662,16 @@ img{ max-width:100%; display:block; }
 .ai-chat-input button:disabled{ opacity:.5; }
 .ai-chat-input #aiChatMic{ background:var(--card-soft); border:1px solid var(--border); color:var(--text); }
 .ai-chat-input #aiChatMic.rec{ background:#e63946; border-color:#e63946; color:#fff; animation:aiBlink 1s infinite; }
+/* بطاقات المنتجات داخل الشات: عرض + شراء */
+.ai-cards{ display:flex; flex-direction:column; gap:8px; align-self:flex-start; max-width:88%; }
+.ai-card{ background:var(--card); border:1px solid var(--gold); border-radius:14px; padding:9px 11px; box-shadow:0 0 14px rgba(224,168,58,.18); }
+.ai-card-info{ display:flex; gap:8px; align-items:center; font-size:12px; margin-bottom:8px; }
+.ai-card-info > i{ color:var(--gold); font-size:16px; }
+.ai-card-info small{ display:block; color:var(--muted); font-size:10.5px; margin-top:2px; }
+.ai-card-btns{ display:flex; gap:7px; }
+.ai-btn{ flex:1; text-align:center; font-size:11.5px; font-weight:800; padding:8px 6px; border-radius:10px; text-decoration:none; display:flex; align-items:center; justify-content:center; gap:5px; }
+.ai-btn.view{ background:var(--card-soft); border:1px solid var(--border); color:var(--text); }
+.ai-btn.buy{ background:linear-gradient(135deg, var(--accent), var(--accent-dim)); color:#fff; border:none; }
 
 /* =========================================================
    نماذج / مصادقة (Login & Register)
