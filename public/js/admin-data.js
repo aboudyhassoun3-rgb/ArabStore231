@@ -234,6 +234,7 @@ document.addEventListener("DOMContentLoaded", ()=>{
       logo:`/admin/settings/logo`, subsection:`/admin/subsections/${id}/image`,
       manual_method:`/admin/deposit-methods/manual/${id}/image`, auto_method:`/admin/deposit-methods/auto/${id}/image`,
       app_icon:`/admin/settings/app-icon`, dev_logo:`/admin/settings/dev-logo`,
+      notif_icon:`/admin/settings/notif-icon`,
     };
     const fd = new FormData();
     fd.append("file", file);
@@ -244,7 +245,7 @@ document.addEventListener("DOMContentLoaded", ()=>{
       if(kind === "product") loadProducts();
       if(kind === "category") loadCategories();
       if(kind === "subsection") loadSubsections();
-      if(kind === "banner" || kind === "logo" || kind === "app_icon" || kind === "dev_logo") loadSettings();
+      if(kind === "banner" || kind === "logo" || kind === "app_icon" || kind === "dev_logo" || kind === "notif_icon") loadSettings();
       if(kind === "manual_method" || kind === "auto_method") loadDepositMethods();
     }catch(err){ toast(err.message, "error"); }
   });
@@ -1570,6 +1571,15 @@ async function loadSettings(){
     iconWrap.style.display = "block";
   }else{ iconWrap.style.display = "none"; }
 
+  const notifWrap = document.getElementById("notifIconPreviewWrap");
+  if(notifWrap){
+    if(s.notif_icon){
+      document.getElementById("notifIconPreview").src = s.notif_icon;
+      document.getElementById("notifIconPreview").onerror = ()=>{ notifWrap.style.display = "none"; };
+      notifWrap.style.display = "block";
+    }else{ notifWrap.style.display = "none"; }
+  }
+
   loadMaintenanceStatus();
 }
 
@@ -1658,6 +1668,10 @@ async function installPwa(){
 
 async function removeAppIcon(){
   try{ await adminFetch("/admin/settings/app-icon", { method:"DELETE" }); toast("تمت إزالة أيقونة التطبيق"); loadSettings(); }
+  catch(err){ toast(err.message, "error"); }
+}
+async function removeNotifIcon(){
+  try{ await adminFetch("/admin/settings/notif-icon", { method:"DELETE" }); toast("تمت إزالة أيقونة الإشعارات — ستُستخدم أيقونة التطبيق/اللوغو"); loadSettings(); }
   catch(err){ toast(err.message, "error"); }
 }
 

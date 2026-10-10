@@ -198,6 +198,16 @@
       </div>
 
       <div class="panel">
+        <div class="panel-head"><h3>🔔 شعار الإشعارات (يظهر مع كل إشعار يصل للمستخدم)</h3></div>
+        <div id="notifIconPreviewWrap" style="display:none; margin-bottom:12px;">
+          <img id="notifIconPreview" style="width:64px; height:64px; border-radius:16px; border:1px solid var(--border); display:block; object-fit:cover;">
+        </div>
+        <button class="btn-sm" onclick="pickImage('notif_icon', null)"><i class="fa-solid fa-camera"></i> رفع / تغيير شعار الإشعارات</button>
+        <button class="btn-sm danger" onclick="removeNotifIcon()"><i class="fa-solid fa-trash"></i> إزالة الشعار</button>
+        <div class="field-hint mt-10">هذه الصورة هي التي <b>تظهر بجانب كل إشعار</b> يصل لهاتف المستخدم حتى والموقع مغلق. الأفضل: صورة <b>مربعة</b> (مثلاً 512×512 px) بخلفية واضحة. بدون صورة مخصصة، يُستخدم شعار التطبيق ثم لوغو الموقع تلقائياً.</div>
+      </div>
+
+      <div class="panel">
         <div class="panel-head"><h3>📱 أيقونة التطبيق (لما المستخدم يضيف الموقع للشاشة الرئيسية)</h3></div>
         <div id="appIconPreviewWrap" style="display:none; margin-bottom:12px;">
           <img id="appIconPreview" style="width:64px; height:64px; border-radius:16px; border:1px solid var(--border); display:block; object-fit:cover;">
@@ -981,6 +991,6 @@
     }
   });
 </script>
-<script src="js/admin-data.js?v=6"></script>
+<script src="js/admin-data.js?v=7"></script>
 </body>
 </html>

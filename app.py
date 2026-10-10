@@ -360,7 +360,7 @@ def init_db():
                     "store_name": "ARAB STORE", "welcome_popup_enabled": "false",
                     "welcome_popup_text": "أهلاً بك في ARAB STORE ✨",
                     "welcome_message": "أهلاً بك في ARAB STORE ✨",
-                    "logo_image": "", "dev_logo": "", "app_icon": "",
+                    "logo_image": "", "dev_logo": "", "app_icon": "", "notif_icon": "",
                     "ai_image_api_url": "", "ai_image_api_key": "",
                     "ai_image_prompt_template": "luxury dark gaming store artwork for {product} with official brand emblem badge, deep navy background #0b0f19, red neon glow accents #ff1a3c, gold highlights #ffc24b, premium glassmorphism card, cinematic lighting, centered composition, bold uppercase English title text only, absolutely no Arabic text, no watermark",
                     "maintenance_enabled": "false", "maintenance_ends_at": ""}
@@ -2659,7 +2659,15 @@ def _vapid_keys():
         print(f"WARNING: vapid keygen failed: {e}")
         return "", ""
 
-def _push_send_one(endpoint, p256dh, auth, title, message, url="/store.html"):
+def _notif_icon_url():
+    """شعار الإشعارات: المرفوع مخصصاً، وإلا أيقونة التطبيق/اللوغو، وإلا /site-icon."""
+    try:
+        icon = get_setting("notif_icon", "") or get_setting("app_icon", "") or get_setting("logo_image", "")
+    except Exception:
+        icon = ""
+    return icon or "/site-icon"
+
+def _push_send_one(endpoint, p256dh, auth, title, message, url="/store.html", icon=""):
     """إرسال push واحد — يرجع 'sent' أو 'gone' (اشتراك منتهٍ) أو 'error'."""
     try:
         pub, prv = _vapid_keys()
@@ -2669,8 +2677,11 @@ def _push_send_one(endpoint, p256dh, auth, title, message, url="/store.html"):
         from pywebpush import webpush as _wp
         import json as _j
         v = _V.from_string(prv)
+        payload = {"title": title, "message": message, "url": url}
+        if icon:
+            payload["icon"] = icon
         _wp({"endpoint": endpoint, "keys": {"p256dh": p256dh, "auth": auth}},
-            _j.dumps({"title": title, "message": message, "url": url}, ensure_ascii=False),
+            _j.dumps(payload, ensure_ascii=False),
             vapid_private_key=v, vapid_claims={"sub": "mailto:admin@arab2store.vercel.app"},
             timeout=10, ttl=86400)
         return "sent"
@@ -2688,11 +2699,12 @@ def _push_send_one(endpoint, p256dh, auth, title, message, url="/store.html"):
 def push_to_user(uid, title, message, url="/activity.html"):
     """push لمستخدم محدد (كل أجهزته) — صامت تماماً ولا يكسر أي مسار."""
     try:
+        icon = _notif_icon_url()
         with get_db() as db:
             rows = db.execute("SELECT endpoint,p256dh,auth FROM push_subscriptions WHERE user_id=?", (uid,)).fetchall()
         for r in rows:
             try:
-                _push_send_one(r[0], r[1], r[2], title, message, url)
+                _push_send_one(r[0], r[1], r[2], title, message, url, icon)
             except Exception:
                 pass
     except Exception:
@@ -2702,11 +2714,12 @@ def push_broadcast(title, message, url="/store.html"):
     """بث لكل المشتركين (مستخدمون وضيوف) — يرجع (sent, gone)."""
     sent = gone = 0
     try:
+        icon = _notif_icon_url()
         with get_db() as db:
             rows = db.execute("SELECT endpoint,p256dh,auth FROM push_subscriptions").fetchall()
         for r in rows:
             try:
-                res = _push_send_one(r[0], r[1], r[2], title, message, url)
+                res = _push_send_one(r[0], r[1], r[2], title, message, url, icon)
                 if res == "sent":
                     sent += 1
                 elif res == "gone":
@@ -3825,6 +3838,10 @@ def adm_devlogo(): return _save_setting_file("dev_logo")
 @require_admin
 def adm_appicon(): return _save_setting_file("app_icon")
 
+@app.post("/api/admin/settings/notif-icon")
+@require_admin
+def adm_notificon(): return _save_setting_file("notif_icon")
+
 
 def _clear_setting(key):
     set_setting(key, "")
@@ -3844,6 +3861,10 @@ def adm_devlogo_del(): return _clear_setting("dev_logo")
 @app.delete("/api/admin/settings/app-icon")
 @require_admin
 def adm_appicon_del(): return _clear_setting("app_icon")
+
+@app.delete("/api/admin/settings/notif-icon")
+@require_admin
+def adm_notificon_del(): return _clear_setting("notif_icon")
 
 @app.post("/api/admin/settings/banner-image")
 @require_admin
