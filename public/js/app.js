@@ -292,12 +292,13 @@ function aiCardsHTML(cards){
     const price = Number(c.price || 0);
     const priceTxt = price > 0 ? " — $" + price.toFixed(2) : "";
     const sku = String(c.sku_name || "").replace(/&/g,"&amp;").replace(/</g,"&lt;");
+    const mode = c.mode || "both";
+    const viewBtn = `<a href="/product.html?id=${c.product_id}" class="ai-btn view"><i class="fa-solid fa-eye"></i> عرض المنتج</a>`;
+    const buyBtn = c.sku_id ? `<a href="/product.html?id=${c.product_id}&buy=${encodeURIComponent(c.sku_id)}" class="ai-btn buy"><i class="fa-solid fa-cart-shopping"></i> شراء</a>` : "";
+    const btns = mode === "view" ? viewBtn : (mode === "buy" ? (buyBtn + viewBtn) : (viewBtn + buyBtn));
     return `<div class="ai-card">
       <div class="ai-card-info"><i class="fa-solid fa-box-open"></i><div><b>${nm}</b>${sku ? `<small>${sku}${priceTxt}</small>` : ""}</div></div>
-      <div class="ai-card-btns">
-        <a href="/product.html?id=${c.product_id}" class="ai-btn view"><i class="fa-solid fa-eye"></i> عرض المنتج</a>
-        ${c.sku_id ? `<a href="/product.html?id=${c.product_id}&buy=${encodeURIComponent(c.sku_id)}" class="ai-btn buy"><i class="fa-solid fa-cart-shopping"></i> شراء</a>` : ""}
-      </div>
+      <div class="ai-card-btns">${btns}</div>
     </div>`;
   }).join("") + `</div>`;
 }

@@ -2889,7 +2889,10 @@ def _ai_system_prompt():
             "6) إن احتاج المستخدم الإدارة (مشكلة دفع، طلب عالق، استفسار خاص): أعطه رقم/رابط الدعم.\n"
             "7) روابط المنتجات بهذا الشكل: /product.html?id=رقم_المنتج.\n"
             "8) إجابات قصيرة مركزة (5 أسطر كحد أقصى عادة).\n"
-            "9) عند ترشيح منتجات بعينها أضف سطراً أخيراً فيه وسوم خفية فقط بهذا الشكل: [PRODUCT:7] لزر العرض، واختيارياً [BUY:7:45] لزر الشراء المباشر لأفضل باقة — انسخ الأرقام من القائمة حصراً ولا تخترع أرقاماً، ولا تشرح الوسوم للمستخدم فهي لا تظهر له.")
+            "9) الوسوم الخفية إلزامية: كلما ذكرت منتجاً بعينه من القائمة يجب أن ينتهي ردك بسطر وسوم — انسخ الأرقام من القائمة حصراً ولا تخترعها ولا تشرحها أبداً:\n"
+            "   - استفسار (وين/في/بدي شوف/أريد رقم...): [PRODUCT:12]\n"
+            "   - نية شراء واضحة (أريد شراء/بدي اشتري/اشتريلي/اطلب): [BUY:12:45] برقم أفضل باقة من القائمة.\n"
+            "10) الشراء يتم داخل الموقع فقط: شحن الرصيد أولاً من طرق الشحن ثم الشراء من صفحة المنتج — لا تطلب إثبات دفع أبداً ولا تذكر تحويلاً يدوياً.")
     if custom:
         base = f"تعليمات الإدارة (أولوية قصوى):\n{custom}\n\n" + base
     return base + "\n=== بيانات المتجر الحية ===\n" + ctx
@@ -2947,7 +2950,7 @@ def _ai_extract_cards(reply):
                 except Exception: sk = None
                 if not sk: continue
                 cards.append({"product_id": pr[0], "product_name": pr[1],
-                              "sku_id": sk[1] or str(sk[0]),
+                              "sku_id": sk[1] or str(sk[0]), "mode": "buy",
                               "sku_name": sk[2], "price": float(sk[3] or 0),
                               "available": bool(sk[4] is None or int(sk[4]) > 0)})
             for pid in pids:
@@ -2960,13 +2963,68 @@ def _ai_extract_cards(reply):
                 try: sk = db.execute("SELECT id,public_id,name,price,stock_qty FROM skus WHERE product_id=? ORDER BY price LIMIT 1", (pidn,)).fetchone()
                 except Exception: sk = None
                 cards.append({"product_id": pr[0], "product_name": pr[1],
-                              "sku_id": (sk[1] or str(sk[0])) if sk else "",
+                              "sku_id": (sk[1] or str(sk[0])) if sk else "", "mode": "view",
                               "sku_name": sk[2] if sk else "", "price": float(sk[3] or 0) if sk else 0,
                               "available": bool(sk and (sk[4] is None or int(sk[4]) > 0))})
         clean = _re.sub(r"\[(PRODUCT\s*:\s*\d+|BUY\s*:\s*\d+\s*:\s*[A-Za-z0-9\-_]+)\]", "", reply or "")
         return clean.strip(), cards[:4]
     except Exception:
         return reply, []
+
+_AI_BUY_WORDS = ("شراء", "اشتري", "اشترى", "اشتر", "اطلب", "أطلب", "احجز", "buy", "purchase", "order", "checkout")
+_AI_STOP_WORDS = {"رقم", "ارقام", "أرقام", "منتج", "منتجات", "قسم", "السعر", "سعر", "متوفر", "متوفرة",
+                  "جديد", "جديدة", "شحن", "اشحن", "بطاقة", "بطاقات", "اريد", "أريد", "بدي", "عندكم",
+                  "موجود", "موجودة", "وين", "كيف", "شو", "هاي", "هذا", "هذه", "اللي", "الذي", "لو",
+                  "سوريا", "مع", "من", "في", "على", "إلى", "الى", "هل", "ممكن", "بد", "بده"}
+
+def _ai_words(t):
+    import re as _re
+    return [w for w in _re.findall(r"[\w\u0600-\u06FF]+", t or "") if len(w) >= 3]
+
+def _ai_autocard(user_msg, reply):
+    """بطاقة احتياطية: إن تجاهل النموذج الوسوم نطابق المنتج من الكلام ونرفق بطاقته.
+    استفسار ← وضع عرض، نية شراء (شراء/اشتري/اطلب) ← وضع شراء."""
+    try:
+        with get_db() as db:
+            try: prods = db.execute("SELECT id,name FROM products").fetchall()
+            except Exception: return None
+            sku_by_prod = {}
+            try:
+                for s in db.execute("SELECT product_id,public_id,id,name,price,stock_qty FROM skus").fetchall():
+                    sku_by_prod.setdefault(s[0], []).append(s)
+            except Exception: pass
+        hay = _ai_words(user_msg) + _ai_words(reply)
+        if not hay:
+            return None
+        hayset = set(hay)
+        best, best_score = None, 0
+        for pr in prods:
+            pw = [w for w in _ai_words(pr[1]) if w not in _AI_STOP_WORDS]
+            if not pw:
+                continue
+            hit = 0
+            for w in pw:
+                for h in hayset:
+                    if len(h) >= 4 and (w == h or w in h or h in w):
+                        hit += 1
+                        break
+            score = hit / len(pw)
+            if score > best_score:
+                best, best_score = pr, score
+        if not best or best_score < 0.6:
+            return None
+        buy_mode = any(k in (user_msg or "") for k in _AI_BUY_WORDS)
+        skus = sku_by_prod.get(best[0], [])
+        avail = [s for s in skus if s[5] is None or int(s[5]) > 0]
+        pool = avail or skus
+        try: sk = sorted(pool, key=lambda s: float(s[4] or 0))[0] if pool else None
+        except Exception: sk = pool[0] if pool else None
+        return {"product_id": best[0], "product_name": best[1],
+                "sku_id": (sk[1] or str(sk[2])) if sk else "", "mode": "buy" if buy_mode else "view",
+                "sku_name": sk[3] if sk else "", "price": float(sk[4] or 0) if sk else 0,
+                "available": bool(sk and (sk[5] is None or int(sk[5]) > 0))}
+    except Exception:
+        return None
 
 @app.get("/api/ai-agent/config")
 def ai_agent_config():
@@ -3018,6 +3076,11 @@ def ai_agent_chat():
         reply = "لم أفهم سؤالك تماماً — جرّب تسألني عن منتج أو سعر أو طريقة شحن 🤖"
     reply = _strip_thinking(reply)
     reply, cards = _ai_extract_cards(reply)
+    if not cards:
+        # النموذج تجاهل الوسوم — نطابق المنتج من الكلام ونرفق بطاقته (عرض/شراء حسب النية)
+        auto = _ai_autocard(msg, reply)
+        if auto:
+            cards = [auto]
     # ذاكرة الوكيل: حفظ السؤال والرد لمراجعة الأدمن وتحسين البرومبت (لا يكسر الرد أبداً)
     try:
         with get_db() as db:
