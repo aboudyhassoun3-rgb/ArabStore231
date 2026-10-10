@@ -115,6 +115,27 @@ async function apiFetch(path, opts={}){
   return data;
 }
 
+/* ===== صورة المستخدم من بريده (الأصلية إن وجدت، وإلا الأيقونة الحالية) ===== */
+function paintAvatars(user){
+  const boxes = document.querySelectorAll(".drawer-avatar");
+  if(!boxes.length) return;
+  const fallback = '<i class="fa-solid fa-user"></i>';
+  if(!user || !user.email){
+    boxes.forEach(b=>{ b.classList.remove("has-img"); b.innerHTML = fallback; });
+    return;
+  }
+  const esc = s=>String(s||"").replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  // الأساسي: صورة البريد الأصلية (unavatar: Google/Gravatar...)، والاحتياط Gravatar
+  const primary = esc(user.avatar_unavatar || user.avatar_url || ("https://unavatar.io/" + encodeURIComponent(user.email) + "?fallback=false"));
+  const secondary = esc(user.avatar_gravatar || "");
+  boxes.forEach(b=>{
+    b.classList.add("has-img");
+    b.innerHTML = `<img src="${primary}" alt="" loading="lazy" referrerpolicy="no-referrer"`
+      + ` data-fb="${secondary}"`
+      + ` onerror="if(this.dataset.fb && !this.dataset.done){this.dataset.done='1';this.src=this.dataset.fb;}else{this.parentElement.classList.remove('has-img');this.parentElement.innerHTML='${fallback}';}">`;
+  });
+}
+
 /* ===== الدرج: تحديث حالة المستخدم (زائر / مسجل) ===== */
 function renderAuthState(){
   const user = Store.user();
@@ -134,8 +155,10 @@ function renderAuthState(){
     if(balancePill) balancePill.textContent = "$0.00";
     guestOnlyEls.forEach(el => el.style.display = "none");
     if(apiMenuItem) apiMenuItem.style.display = "none";
+    paintAvatars(null);
     return;
   }
+  paintAvatars(user);
   if(nameEl){
     if(user.discount_tier_name){
       nameEl.innerHTML = `<span class="badge-vip"><i class="fa-solid fa-crown"></i> ${user.discount_tier_name}</span> ${user.name || "مستخدم"}`;

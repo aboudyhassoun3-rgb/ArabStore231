@@ -432,6 +432,20 @@ def get_web_by_id(wid):
     with get_db() as db:
         return db.execute("SELECT * FROM web_users WHERE id=?", (wid,)).fetchone()
 
+def _avatar_urls(email):
+    """روابط صورة البريد الأصلية ( unavatar يجلب صورة Google/Gravatar إن وجدت،
+    وGravatar كاحتياط). الروابط تُرجع 404 عند غياب الصورة لتعرض الواجهة الأيقونة."""
+    import hashlib as _hl
+    import urllib.parse as _up
+    e = (email or "").strip().lower()
+    if not e:
+        return {"avatar_url": "", "avatar_unavatar": "", "avatar_gravatar": ""}
+    h = _hl.md5(e.encode("utf-8")).hexdigest()
+    grav = f"https://www.gravatar.com/avatar/{h}?s=200&d=404"
+    unav = f"https://unavatar.io/{_up.quote(e)}?fallback=false"
+    return {"avatar_url": unav, "avatar_unavatar": unav, "avatar_gravatar": grav}
+
+
 def row_to_user_public(w):
     import sqlite3 as _s
     uid = w["site_user_id"] if isinstance(w, _s.Row) else w[4]
@@ -448,7 +462,8 @@ def row_to_user_public(w):
             "country": w["country"] if isinstance(w, _s.Row) else (w[9] if len(w) > 9 else ""),
             "phone": w["phone"] if isinstance(w, _s.Row) else (w[10] if len(w) > 10 else ""),
             "discount_percent": disc[1] if disc else 0, "discount_tier_name": disc[0] if disc else "",
-            "is_owner": (email or "").lower() in OWNER_EMAILS, "is_admin": is_admin(email)}
+            "is_owner": (email or "").lower() in OWNER_EMAILS, "is_admin": is_admin(email),
+            **_avatar_urls(email)}
 
 def balance_of(uid):
     with get_db() as db:
@@ -529,7 +544,8 @@ def _user_public_db(db, w):
             "country": _g(w, "country", 9, ""), "phone": _g(w, "phone", 10, ""),
             "discount_percent": disc[1] if disc else 0, "discount_tier_name": disc[0] if disc else "",
             "is_owner": (email or "").lower() in OWNER_EMAILS,
-            "is_admin": bool(adm) or (email or "").lower() in OWNER_EMAILS}
+            "is_admin": bool(adm) or (email or "").lower() in OWNER_EMAILS,
+            **_avatar_urls(email)}
 
 def _issue_token_db(db, web_id, admin=False, owner=False):
     tok = secrets.token_urlsafe(32)

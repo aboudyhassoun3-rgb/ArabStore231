@@ -271,6 +271,11 @@ img{ max-width:100%; display:block; }
   display:flex; align-items:center; justify-content:center;
   font-size:22px; color:#fff; border:2px solid var(--border);
   box-shadow:0 0 18px var(--accent-soft);
+  overflow:hidden; flex-shrink:0;
+}
+.drawer-avatar.has-img{ background:none; padding:0; }
+.drawer-avatar.has-img img{
+  width:100%; height:100%; object-fit:cover; border-radius:50%; display:block;
 }
 .drawer-user-name{ font-weight:800; font-size:14px; display:flex; align-items:center; justify-content:center; gap:6px; flex-wrap:wrap; }
 .drawer-user-email{ font-size:10.5px; color:var(--muted); margin:4px 0 12px; }
