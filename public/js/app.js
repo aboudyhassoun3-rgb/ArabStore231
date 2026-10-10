@@ -170,10 +170,10 @@ function setupFab(){
   const fab = document.getElementById("fabMainBtn");
   const opts = document.getElementById("fabOptions");
   if(!fab || !opts) return;
-  // الوضع الافتراضي: قائمة الدعم القديمة — تُستبدل بالمساعد الذكي إن كان مفعّلاً
+  // الضغط على الدائرة يفتح قائمة كل الأزرار: الوكيل 🤖 + الدعم (تيليجرام/واتساب/القنوات)
   fab.addEventListener("click", (e)=>{
     e.stopPropagation();
-    if(AI_AGENT.enabled){ toggleAiChat(); return; }
+    ensureAgentOption();
     opts.classList.toggle("open");
   });
   document.addEventListener("click", (e)=>{
@@ -201,6 +201,22 @@ async function initAiAgent(fab){
   if(icon) icon.className = "fa-solid fa-robot";
   fab.title = AI_AGENT.name;
   buildAiChatPanel();
+  ensureAgentOption();
+}
+
+/* زر الوكيل داخل قائمة الدائرة — أول زر فوق أزرار الدعم */
+function ensureAgentOption(){
+  const opts = document.getElementById("fabOptions");
+  if(!opts || !AI_AGENT.enabled) return;
+  if(document.getElementById("fabAgentBtn")) return;
+  const b = document.createElement("button");
+  b.id = "fabAgentBtn";
+  b.className = "fab-option ai-agent-opt";
+  b.title = AI_AGENT.name;
+  b.setAttribute("aria-label", AI_AGENT.name);
+  b.innerHTML = '<i class="fa-solid fa-robot"></i>';
+  b.addEventListener("click", (e)=>{ e.stopPropagation(); opts.classList.remove("open"); toggleAiChat(true); });
+  opts.prepend(b);
 }
 
 function buildAiChatPanel(){
@@ -372,10 +388,11 @@ function applyContactLinks(){
     { url: c.whatsapp_channel_url, icon: "fa-solid fa-bullhorn", title: "قناة أخبار واتساب" },
     { url: c.telegram_channel_url, icon: "fa-solid fa-tower-broadcast", title: "قناة أخبار تيليجرام" },
   ].filter(l => l.url);
-  if(!links.length) return; // نخلي الروابط الافتراضية بالصفحة
+  if(!links.length){ ensureAgentOption(); return; } // نخلي الروابط الافتراضية بالصفحة
   opts.innerHTML = links.map(l =>
     `<a href="${l.url}" target="_blank" rel="noopener" class="fab-option" title="${l.title}"><i class="${l.icon}"></i></a>`
   ).join("");
+  ensureAgentOption();
 }
 
 /* ===== إشعارات فعلية بالخلفية مع صوت رنين ===== */

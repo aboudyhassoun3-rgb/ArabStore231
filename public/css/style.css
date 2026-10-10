@@ -607,6 +607,8 @@ img{ max-width:100%; display:block; }
 .fab-options.open{ opacity:1; visibility:visible; transform:translateY(0); }
 .fab-option{ width:42px; height:42px; border-radius:50%; display:flex; align-items:center; justify-content:center; background:rgba(139,92,246,.9); border:1px solid rgba(255,255,255,.25); }
 .fab-option i{ color:#fff; font-size:18px; }
+.fab-option.ai-agent-opt{ background:linear-gradient(150deg, #ff2d55, #8b2fc9); border-color:rgba(255,255,255,.4); box-shadow:0 6px 18px rgba(255,45,85,.5); width:48px; height:48px; }
+.fab-option.ai-agent-opt i{ font-size:21px; }
 /* نبضة على زر المساعد الذكي */
 .fab-main.ai-on{ background:linear-gradient(150deg, #ff2d55, #8b2fc9); box-shadow:0 8px 24px rgba(255,45,85,.5); position:relative; }
 .fab-main.ai-on::after{ content:""; position:absolute; top:2px; left:2px; width:10px; height:10px; border-radius:50%; background:#22e58a; border:2px solid #fff; box-shadow:0 0 8px #22e58a; }
