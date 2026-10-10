@@ -100,6 +100,11 @@
       <span class="val mono" id="dOrderId">—</span>
     </div>
     <div class="detail-row">
+      <button class="copy-mini" onclick="copyDetailField('dTrack')"><i class="fa-regular fa-copy"></i></button>
+      <span class="val mono" id="dTrack" dir="ltr">—</span>
+      <span class="lbl">رقم التتبع 🔖</span>
+    </div>
+    <div class="detail-row">
       <span class="lbl">المنتج</span>
       <span class="val" id="dProduct">—</span>
     </div>
@@ -194,7 +199,7 @@
       if(from && o.date < from) return false;
       if(to && o.date > (to + " 23:59:59")) return false;
       if(q){
-        const hay = `${o.product_name} ${o.category_name} ${o.player_id||''} #${o.id}`.toLowerCase();
+        const hay = `${o.product_name} ${o.category_name} ${o.player_id||''} #${o.id} ${o.track||''}`.toLowerCase();
         if(!hay.includes(q)) return false;
       }
       return true;
@@ -228,6 +233,7 @@
           <div>
             <div class="order-name">${o.product_name}</div>
             <div class="order-id">#${o.id} ${o.source==='api' ? '<span style="color:var(--success);font-size:9px;"> • API</span>' : '<span style="color:var(--muted);font-size:9px;"> • يدوي</span>'}</div>
+            <div class="order-id" dir="ltr" style="font-family:monospace; font-size:10px; color:var(--accent);">🔖 ${o.track||''}</div>
           </div>
           <span class="status-badge ${o.raw_status}"><i class="fa-solid ${STATUS_ICON[o.raw_status]||'fa-circle'}"></i> ${STATUS_LABEL[o.raw_status]||o.raw_status}</span>
         </div>
@@ -351,6 +357,7 @@
       document.getElementById("orderDetailView").style.display = "block";
 
       document.getElementById("dOrderId").textContent = d.ext_order_id ? `ID_${d.ext_order_id}` : `#${d.id}`;
+      document.getElementById("dTrack").textContent = d.track || `TRK-${d.id}`;
       document.getElementById("dProduct").textContent = d.product_name;
       document.getElementById("dCategory").textContent = d.category_name;
       document.getElementById("dQty").textContent = d.qty;

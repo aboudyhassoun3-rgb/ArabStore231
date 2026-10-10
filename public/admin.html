@@ -67,6 +67,7 @@
 
     <div class="admin-nav-group">النظام</div>
     <a href="#" class="admin-nav-item" data-section="backup" onclick="goSection('backup', this); return false;"><i class="fa-solid fa-database"></i> النسخ الاحتياطي</a>
+    <a href="#" class="admin-nav-item" data-section="logs" onclick="goSection('logs', this); return false;"><i class="fa-solid fa-clipboard-list"></i> سجل الأدمن</a>
 
     <div class="drawer-footer" style="margin-top:18px;">
       <a href="/store.html"><i class="fa-solid fa-arrow-right-from-bracket"></i> الرجوع للموقع</a>
@@ -82,6 +83,11 @@
         <div class="admin-title" id="sectionTitle">الرئيسية</div>
       </div>
       <div class="flex items-center gap-8">
+        <div style="position:relative;">
+          <input type="text" id="adminGlobalSearch" placeholder="🔍 بحث شامل: طلب / مستخدم / إيداع..." oninput="adminGlobalSearch(this.value)" autocomplete="off"
+            style="padding:9px 12px; border-radius:10px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); width:200px; font-size:11px;">
+          <div id="adminSearchPanel" style="display:none; position:absolute; left:0; top:44px; width:320px; max-height:380px; overflow-y:auto; background:var(--card); border:1px solid var(--border); border-radius:14px; box-shadow:0 12px 30px rgba(0,0,0,.4); z-index:60; padding:10px;"></div>
+        </div>
         <div style="position:relative;">
           <button class="icon-btn" onclick="toggleAdminAlerts()" style="width:36px; height:36px; font-size:14px;">
             <i class="fa-solid fa-bell"></i>
@@ -305,9 +311,13 @@
             <button class="tab-btn" onclick="filterAdminOrders('failed', this)">فاشلة</button>
           </div>
         </div>
+        <div class="search-row" style="margin-bottom:10px;">
+          <button class="search-btn" onclick="renderOrdersTable()"><i class="fa-solid fa-magnifying-glass"></i></button>
+          <input type="text" id="ordersSearchInput" placeholder="بحث برقم الطلب / التتبع / اللاعب / المنتج..." oninput="renderOrdersTable()">
+        </div>
         <div class="table-scroll">
           <table class="data-table">
-            <thead><tr><th>#</th><th>المستخدم</th><th>المنتج</th><th>آيدي اللاعب</th><th>السعر</th><th>الحالة</th><th>إجراء</th></tr></thead>
+            <thead><tr><th>#</th><th>رقم التتبع 🔖</th><th>المستخدم</th><th>المنتج</th><th>آيدي اللاعب</th><th>السعر</th><th>الحالة</th><th>إجراء</th></tr></thead>
             <tbody id="ordersTableBody"></tbody>
           </table>
         </div>
@@ -322,7 +332,7 @@
         </div>
         <div class="table-scroll">
           <table class="data-table">
-            <thead><tr><th>#</th><th>المستخدم</th><th>المنتج</th><th>آيدي اللاعب</th><th>السعر</th><th>الحالة</th><th>إجراء</th></tr></thead>
+            <thead><tr><th>#</th><th>رقم التتبع 🔖</th><th>المستخدم</th><th>المنتج</th><th>آيدي اللاعب</th><th>السعر</th><th>الحالة</th><th>إجراء</th></tr></thead>
             <tbody id="shopOrdersBody"></tbody>
           </table>
         </div>
@@ -333,6 +343,10 @@
     <section class="admin-section" id="sec-deposits">
       <div class="panel">
         <div class="panel-head"><h3>طلبات الإيداع اليدوي</h3></div>
+        <div class="search-row" style="margin-bottom:10px;">
+          <button class="search-btn" onclick="renderDepositsTable()"><i class="fa-solid fa-magnifying-glass"></i></button>
+          <input type="text" id="depositsSearchInput" placeholder="بحث برقم الإيداع / الكود / المستخدم..." oninput="renderDepositsTable()">
+        </div>
         <div class="table-scroll">
           <table class="data-table">
             <thead><tr><th>#</th><th>المستخدم</th><th>الطريقة</th><th>المبلغ USD</th><th>المبلغ SYP</th><th>الكود</th><th>إجراء</th></tr></thead>
@@ -669,6 +683,27 @@
       </div>
     </section>
 
+    <!-- ========== سجل الأدمن ========== -->
+    <section class="admin-section" id="sec-logs">
+      <div class="panel">
+        <div class="panel-head">
+          <h3><i class="fa-solid fa-clipboard-list"></i> سجل نشاط الأدمن</h3>
+          <button class="btn-sm" onclick="loadAdminLogs()"><i class="fa-solid fa-arrows-rotate"></i> تحديث</button>
+        </div>
+        <div class="field-hint" style="margin-bottom:10px;">كل إجراء مهم (قبول/رفض طلب أو إيداع، تعديل رصيد، حظر، رتب، API، مزوّدون، إعدادات، صيانة) يُسجَّل هنا مع الوقت.</div>
+        <div class="search-row" style="margin-bottom:10px;">
+          <button class="search-btn" onclick="renderAdminLogs()"><i class="fa-solid fa-magnifying-glass"></i></button>
+          <input type="text" id="logsSearchInput" placeholder="بحث في السجل..." oninput="renderAdminLogs()">
+        </div>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead><tr><th>الوقت</th><th>الفاعل</th><th>الإجراء</th><th>الهدف</th><th>التفاصيل</th></tr></thead>
+            <tbody id="logsTableBody"><tr><td colspan="5">...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
+    </section>
+
     <section class="admin-section" id="sec-smart-admin">
       <div class="panel">
         <div class="panel-head"><h3>إضافة مزوّد جديد</h3></div>
@@ -682,6 +717,7 @@
           <input type="text" id="providerOrderPath" placeholder="مسار الطلب: ‎/api/order" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);">
           <input type="text" id="providerStatusPath" placeholder="مسار الحالة: ‎/api/order-status" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);">
           <input type="text" id="providerCatalogPath" placeholder="مسار الكتالوج: ‎/products" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);">
+          <input type="text" id="providerBalancePath" placeholder="مسار الرصيد (اختياري): ‎/client/api/balance" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);">
         </div>
         <button class="btn btn-primary mt-10" style="width:auto; padding:10px 18px;" onclick="addProvider()"><i class="fa-solid fa-plus"></i> إضافة مزوّد جديد</button>
       </div>
@@ -705,14 +741,14 @@
         <div id="impFileResult" class="field-hint mt-10"></div>
       </div>
       <div class="panel">
-        <div class="panel-head"><h3>مزوّدو شحن الألعاب (API)</h3></div>
+        <div class="panel-head"><h3>مزوّدو شحن الألعاب (API)</h3><button class="btn-sm" onclick="refreshAllBalances(this)"><i class="fa-solid fa-wallet"></i> تحديث كل الأرصدة</button></div>
         <div class="info-banner" style="margin-bottom:12px;">
           <i class="fa-solid fa-cloud-arrow-down"></i>
           <div><b>استيراد تلقائي:</b> بيسحب كامل كتالوج المزوّد (كل الأقسام والمنتجات) وينشئه بموقعك دفعة وحدة، ويطبّق هامش الربح يلي تحدده فوراً على كل الأسعار.</div>
         </div>
         <div class="table-scroll">
           <table class="data-table">
-            <thead><tr><th>الاسم</th><th>API URL</th><th>عدد المنتجات المرتبطة</th><th>هامش الاستيراد %</th><th>إجراء</th></tr></thead>
+            <thead><tr><th>الاسم</th><th>API URL</th><th>💰 الرصيد</th><th>عدد المنتجات المرتبطة</th><th>هامش الاستيراد %</th><th>إجراء</th></tr></thead>
             <tbody id="providersTableBody"></tbody>
           </table>
         </div>
@@ -931,6 +967,6 @@
     }
   });
 </script>
-<script src="js/admin-data.js?v=2"></script>
+<script src="js/admin-data.js?v=3"></script>
 </body>
 </html>

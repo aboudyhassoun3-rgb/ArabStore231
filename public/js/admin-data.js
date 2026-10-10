@@ -7,7 +7,7 @@
 const SECTION_TITLES = {
   dashboard:"الرئيسية", orders:"الطلبات", deposits:"الإيداعات",
   users:"المستخدمون", "discount-tiers":"المستويات", products:"المنتجات",
-  "smart-admin":"الإدارة الذكية", backup:"النسخ الاحتياطي",
+  "smart-admin":"الإدارة الذكية", backup:"النسخ الاحتياطي", logs:"سجل الأدمن",
 };
 
 const SECTION_LOADERS = {
@@ -20,6 +20,7 @@ const SECTION_LOADERS = {
   products: ()=>Promise.all([loadProducts(), loadSections()]),
   "smart-admin": ()=>Promise.all([loadProviders(), loadPricing()]),
   backup: ()=>Promise.all([loadBackups(), loadSnaps()]),
+  logs: loadAdminLogs,
 };
 async function changeAdminPassword(){
   const cur = document.getElementById("admCurPw").value, nw = document.getElementById("admNewPw").value;
@@ -413,14 +414,27 @@ function resetProfitsFilter(){
 
 /* ===== 2) الطلبات ===== */
 let allOrdersCache = [];
+let adminOrdersFilter = "all";
 async function loadOrders(filter){
   allOrdersCache = await adminFetch("/admin/orders");
-  renderOrdersTable(filter);
+  if(filter) adminOrdersFilter = filter;
+  renderOrdersTable();
 }
-function renderOrdersTable(filter){
-  const items = allOrdersCache.filter(o => filter==="all" || o.status===filter);
+function renderOrdersTable(){
+  const filter = adminOrdersFilter;
+  const q = (document.getElementById("ordersSearchInput")?.value || "").trim().toLowerCase();
+  const items = allOrdersCache.filter(o => {
+    if(filter !== "all" && o.status !== filter) return false;
+    if(q){
+      const hay = `#${o.id} ${o.track||''} ${o.user_id||''} ${o.product_name||''} ${o.player_id||''} ${o.provider_order||''}`.toLowerCase();
+      if(!hay.includes(q)) return false;
+    }
+    return true;
+  });
   document.getElementById("ordersTableBody").innerHTML = items.map(o=>`
-    <tr><td>#${o.ref||o.id}<br><small style="color:var(--muted)">${o.source||''}</small></td><td>${o.user_id}</td><td>${o.product_name}</td><td>${o.player_id||'-'}</td>
+    <tr><td>#${o.ref||o.id}<br><small style="color:var(--muted)">${o.source||''}</small></td>
+    <td style="font-family:'Orbitron',monospace; font-size:10px; direction:ltr; cursor:pointer;" title="انقر للنسخ" onclick="navigator.clipboard?.writeText('${o.track||''}'); toast('تم نسخ رقم التتبع ✅')">${o.track||'-'}</td>
+    <td>${o.user_id}</td><td>${o.product_name}</td><td>${o.player_id||'-'}</td>
     <td>${Math.round(o.price_syp).toLocaleString()} ل.س</td>
     <td><span class="status-badge ${o.status}">${STATUS_LABEL[o.status]||o.status}</span></td>
     <td>
@@ -428,7 +442,7 @@ function renderOrdersTable(filter){
         <button class="btn-sm primary" onclick="setOrderStatus('${o.ref||('S'+o.id)}','accept')">✅ قبول</button>
         <button class="btn-sm danger" onclick="setOrderStatus('${o.ref||('S'+o.id)}','reject')">❌ رفض</button>`}
     </td></tr>`).join("")
-    || `<tr><td colspan="7" class="text-muted" style="text-align:center; padding:16px;">لا توجد طلبات</td></tr>`;
+    || `<tr><td colspan="8" class="text-muted" style="text-align:center; padding:16px;">لا توجد طلبات</td></tr>`;
 }
 async function setOrderStatus(ref, action){
   if(!confirm(action==='accept' ? "تأكيد قبول الطلب؟" : "تأكيد رفض الطلب واسترجاع رصيد العميل؟")) return;
@@ -439,14 +453,25 @@ async function setOrderStatus(ref, action){
   }catch(err){ toast(err.message, "error"); }
 }
 function filterAdminOrders(status, btn){
+  adminOrdersFilter = status;
   document.querySelectorAll("#sec-orders .tab-btn").forEach(b=>b.classList.remove("active"));
   btn.classList.add("active");
-  renderOrdersTable(status);
+  renderOrdersTable();
 }
 
 /* ===== 3) طلبات الإيداع ===== */
+let allDepositsCache = [];
 async function loadDeposits(){
-  const deposits = await adminFetch("/admin/deposits");
+  allDepositsCache = await adminFetch("/admin/deposits");
+  renderDepositsTable();
+}
+function renderDepositsTable(){
+  const q = (document.getElementById("depositsSearchInput")?.value || "").trim().toLowerCase();
+  const deposits = allDepositsCache.filter(d => {
+    if(!q) return true;
+    const hay = `#${d.id} ${d.full_name||d.user_id||''} ${d.method_title||''} ${d.code||''}`.toLowerCase();
+    return hay.includes(q);
+  });
   document.getElementById("depositsTableBody").innerHTML = deposits.map(d=>`
     <tr><td>#${d.id}</td><td>${d.full_name||d.user_id}</td><td>${d.method_title}</td><td>$${d.amount_usd}</td>
     <td>${Math.round(d.amount_syp).toLocaleString()} ل.س</td>
@@ -465,6 +490,92 @@ async function rejectDeposit(id){
   catch(err){ toast(err.message, "error"); }
 }
 
+/* ===== البحث الشامل (طلب / مستخدم / إيداع) ===== */
+let _globalSearchTimer = null;
+async function adminGlobalSearch(q){
+  q = (q || "").trim();
+  const panel = document.getElementById("adminSearchPanel");
+  clearTimeout(_globalSearchTimer);
+  if(q.length < 2){ if(panel) panel.style.display = "none"; return; }
+  _globalSearchTimer = setTimeout(async ()=>{
+    try{
+      const r = await adminFetch("/admin/search?q=" + encodeURIComponent(q));
+      const n = (r.orders||[]).length + (r.users||[]).length + (r.deposits||[]).length;
+      let html = "";
+      if(!n) html = `<div class="text-muted" style="text-align:center; padding:14px; font-size:11px;">لا نتائج لـ "${q}"</div>`;
+      if((r.orders||[]).length){
+        html += `<div style="font-size:10px; color:var(--muted); margin:4px 2px;">🛒 الطلبات</div>` + r.orders.map(o=>
+          `<div onclick="jumpToOrder('${o.track||''}')" style="padding:8px; border-radius:8px; cursor:pointer; font-size:11px;" onmouseover="this.style.background='var(--card-soft)'" onmouseout="this.style.background=''">
+            <b>#${o.id}</b> ${o.product||''} <span style="color:var(--muted)">• ${o.player||''}</span><br>
+            <small style="font-family:'Orbitron',monospace; color:var(--accent);">🔖 ${o.track||''}</small></div>`).join("");
+      }
+      if((r.users||[]).length){
+        html += `<div style="font-size:10px; color:var(--muted); margin:6px 2px 4px;">👤 المستخدمون</div>` + r.users.map(u=>
+          `<div onclick="jumpToUser(${u.web_id})" style="padding:8px; border-radius:8px; cursor:pointer; font-size:11px;" onmouseover="this.style.background='var(--card-soft)'" onmouseout="this.style.background=''">
+            <b>${u.name||'—'}</b><br><small style="color:var(--muted);">${u.email||''}</small></div>`).join("");
+      }
+      if((r.deposits||[]).length){
+        html += `<div style="font-size:10px; color:var(--muted); margin:6px 2px 4px;">💳 الإيداعات</div>` + r.deposits.map(d=>
+          `<div onclick="jumpToDeposit(${d.id})" style="padding:8px; border-radius:8px; cursor:pointer; font-size:11px;" onmouseover="this.style.background='var(--card-soft)'" onmouseout="this.style.background=''">
+            <b>#${d.id}</b> ${d.method||''} — ${Math.round(d.amount_syp||0).toLocaleString()} ل.س<br>
+            <small style="font-family:'Orbitron',monospace; color:var(--muted);">${d.code||''}</small></div>`).join("");
+      }
+      panel.innerHTML = html;
+      panel.style.display = "block";
+    }catch(err){ /* تجاهل بهدوء */ }
+  }, 350);
+}
+document.addEventListener("click", (e)=>{
+  const panel = document.getElementById("adminSearchPanel");
+  if(panel && !e.target.closest("#adminGlobalSearch") && !e.target.closest("#adminSearchPanel")) panel.style.display = "none";
+});
+function _hideSearchPanel(){ const p = document.getElementById("adminSearchPanel"); if(p) p.style.display = "none"; }
+function jumpToOrder(track){
+  _hideSearchPanel();
+  goSection("orders", document.querySelector('[data-section=orders]'));
+  setTimeout(()=>{
+    const inp = document.getElementById("ordersSearchInput");
+    if(inp){ inp.value = track || ""; renderOrdersTable(); }
+  }, 350);
+}
+function jumpToUser(webId){
+  _hideSearchPanel();
+  goSection("users", document.querySelector('[data-section=users]'));
+  setTimeout(async ()=>{
+    try{ await openUserDetails(webId); }catch(e){}
+  }, 500);
+}
+function jumpToDeposit(id){
+  _hideSearchPanel();
+  goSection("deposits", document.querySelector('[data-section=deposits]'));
+  setTimeout(()=>{
+    const inp = document.getElementById("depositsSearchInput");
+    if(inp){ inp.value = "#" + id; renderDepositsTable(); }
+  }, 350);
+}
+
+/* ===== سجل الأدمن ===== */
+let ALL_LOGS_ROWS = [];
+async function loadAdminLogs(){
+  try{
+    ALL_LOGS_ROWS = await adminFetch("/admin/logs?limit=300");
+  }catch(err){ ALL_LOGS_ROWS = []; toast(err.message, "error"); }
+  renderAdminLogs();
+}
+function renderAdminLogs(){
+  const q = (document.getElementById("logsSearchInput")?.value || "").trim().toLowerCase();
+  const rows = ALL_LOGS_ROWS.filter(l => {
+    if(!q) return true;
+    return `${l.actor||''} ${l.action||''} ${l.target||''} ${l.detail||''}`.toLowerCase().includes(q);
+  });
+  document.getElementById("logsTableBody").innerHTML = rows.map(l=>`
+    <tr><td style="font-size:10px; white-space:nowrap;">${l.date||''}</td><td>${l.actor||''}</td>
+    <td><b>${l.action||''}</b></td>
+    <td style="font-family:'Orbitron',monospace; font-size:10px; direction:ltr;">${l.target||''}</td>
+    <td style="font-size:10.5px; color:var(--muted);">${l.detail||''}</td></tr>`).join("")
+    || `<tr><td colspan="5" class="text-muted" style="text-align:center; padding:16px;">لا توجد سجلات بعد — ستظهر هنا إجراءات الأدمن القادمة</td></tr>`;
+}
+
 /* ===== 4) المستخدمون ===== */
 let ALL_DISCOUNT_TIERS = [];
 
@@ -473,15 +584,19 @@ let topBalancesChartInstance = null;
 let tierDistributionChartInstance = null;
 
 async function loadUsers(){
-  const [users, tiers, stats] = await Promise.all([
+  // allSettled: فشل الإحصائيات أو الرتب لا يوقف جدول المستخدمين والبحث
+  const [uRes, tRes, sRes] = await Promise.allSettled([
     adminFetch("/admin/users"), adminFetch("/admin/discount-tiers"), adminFetch("/admin/stats")
   ]);
+  const users = uRes.status === "fulfilled" ? uRes.value : [];
+  const tiers = tRes.status === "fulfilled" ? tRes.value : [];
+  const stats = sRes.status === "fulfilled" ? sRes.value : { exchange_rate: 13800, total_orders: 0 };
   ALL_DISCOUNT_TIERS = tiers;
   ALL_USERS_ROWS = users;
 
   // ===== بطاقات الإحصائيات =====
   const rate = stats.exchange_rate || 1;
-  const totalBalanceUsd = users.reduce((s,u)=> s + (u.balance_syp/rate), 0);
+  const totalBalanceUsd = users.reduce((s,u)=> s + ((u.balance_syp||0)/rate), 0);
   const avgBalanceUsd = users.length ? totalBalanceUsd / users.length : 0;
   document.getElementById("usersKpiAvgBalance").textContent = "$" + avgBalanceUsd.toFixed(2);
   document.getElementById("usersKpiOrders").textContent = stats.total_orders.toLocaleString();
@@ -494,8 +609,8 @@ async function loadUsers(){
     tiers.map(t => `<option value="${t.id}">${t.name}</option>`).join("");
 
   // ===== رسم: أعلى 5 مستخدمين رصيداً =====
-  const top5 = [...users].sort((a,b)=> b.balance_syp - a.balance_syp).slice(0,5);
-  renderChart("topBalancesChart", "topBalances", top5.map(u=>u.name), top5.map(u=> Number((u.balance_syp/rate).toFixed(2))), "#e0a83a");
+  const top5 = [...users].sort((a,b)=> (b.balance_syp||0) - (a.balance_syp||0)).slice(0,5);
+  renderChart("topBalancesChart", "topBalances", top5.map(u=>u.name||"—"), top5.map(u=> Number((((u.balance_syp||0)/rate)).toFixed(2))), "#e0a83a");
 
   // ===== رسم: توزيع المستويات =====
   const tierCounts = tiers.map(t => users.filter(u=>u.discount_tier_id===t.id).length);
@@ -541,21 +656,24 @@ function renderUsersTable(){
     if(apiFilter === "enabled" && !u.api_enabled) return false;
     if(apiFilter === "disabled" && u.api_enabled) return false;
     if(tierFilter && String(u.discount_tier_id) !== tierFilter) return false;
-    if(search && !(u.name.toLowerCase().includes(search) || u.email.toLowerCase().includes(search))) return false;
+    if(search){
+      const hay = `${u.name||''} ${u.email||''} ${u.phone||''} ${u.site_user_id||''}`.toLowerCase();
+      if(!hay.includes(search)) return false;
+    }
     return true;
   });
 
   document.getElementById("usersTableBody").innerHTML = filtered.map(u=>`
     <tr>
-    <td style="cursor:pointer;" onclick="openUserDetails(${u.web_id})"><i class="fa-solid fa-circle-info" style="color:var(--accent); margin-left:4px;"></i>${u.name}</td>
-    <td>${u.email}</td><td>${Math.round(u.balance_syp).toLocaleString()} ل.س</td>
+    <td style="cursor:pointer;" onclick="openUserDetails(${u.web_id})"><i class="fa-solid fa-circle-info" style="color:var(--accent); margin-left:4px;"></i>${u.name||'—'}</td>
+    <td>${u.email||'—'}</td><td>${Math.round(u.balance_syp||0).toLocaleString()} ل.س</td>
     <td><select onchange="setUserDiscountTier(${u.web_id}, this.value)" style="padding:6px 8px; border-radius:8px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); font-size:11px;">${tierOptions(u.discount_tier_id)}</select></td>
     <td>${u.blocked ? '<span class="status-badge failed">محظور</span>' : '<span class="status-badge completed">نشط</span>'}</td>
     <td>${u.api_enabled
         ? `<span class="status-badge completed" title="${u.api_key}" style="cursor:pointer;" onclick="navigator.clipboard?.writeText('${u.api_key}'); toast('تم نسخ المفتاح')">مفعّل <i class="fa-solid fa-copy"></i></span>`
         : '<span class="status-badge pending">غير مفعّل</span>'}</td>
     <td style="display:flex; gap:6px; flex-wrap:wrap;">
-      <button class="btn-sm" style="background:var(--gold); color:#000;" onclick="openBalanceAdjust(${u.web_id}, '${u.name.replace(/'/g,"")}')"><i class="fa-solid fa-coins"></i> الرصيد</button>
+      <button class="btn-sm" style="background:var(--gold); color:#000;" onclick="openBalanceAdjust(${u.web_id}, '${(u.name||'').replace(/'/g,"")}')"><i class="fa-solid fa-coins"></i> الرصيد</button>
       <button class="btn-sm ${u.blocked?'primary':'danger'}" onclick="${u.blocked?'unblockUser':'blockUser'}(${u.web_id})">${u.blocked?'رفع الحظر':'حظر'}</button>
       ${u.api_enabled
         ? `<button class="btn-sm danger" onclick="disableUserApi(${u.web_id})">تعطيل API</button>
@@ -1131,7 +1249,12 @@ async function applyMarginToSelected(){
 async function loadProviders(){
   const providers = await adminFetch("/admin/providers");
   document.getElementById("providersTableBody").innerHTML = providers.map(p=>`
-    <tr><td>${p.name}${p.has_token ? "" : ' <span style="color:var(--danger);" title="هذا المزوّد بلا توكن — الطلبات المرتبطة به لن تذهب للـ API">⚠️ بلا توكن</span>'}</td><td style="font-family:'Orbitron',monospace; font-size:10px;">${p.api_url}</td><td>${p.linked_products}</td>
+    <tr><td>${p.name}${p.has_token ? "" : ' <span style="color:var(--danger);" title="هذا المزوّد بلا توكن — الطلبات المرتبطة به لن تذهب للـ API">⚠️ بلا توكن</span>'}</td><td style="font-family:'Orbitron',monospace; font-size:10px;">${p.api_url}</td>
+    <td id="provBal_${p.id}">${p.balance
+      ? `<b style="color:var(--success); font-family:'Orbitron',monospace; font-size:11px;">💰 ${p.balance}</b><br><small style="color:var(--muted); font-size:9px;">${p.balance_at||''}</small>`
+      : `<span class="text-muted" style="font-size:10px;">—</span>`}
+      <button class="btn-sm" style="margin-top:4px;" onclick="refreshBalance(${p.id}, this)"><i class="fa-solid fa-arrows-rotate"></i> تحديث</button></td>
+    <td>${p.linked_products}</td>
     <td><input type="number" id="importMargin_${p.id}" placeholder="10" min="0" step="0.5" style="width:70px; padding:7px; border-radius:8px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); font-size:11px;"></td>
     <td style="display:flex; gap:6px; flex-wrap:wrap;">
       <button class="btn-sm" onclick="testProvider(${p.id}, this)"><i class="fa-solid fa-stethoscope"></i> فحص الاتصال</button>
@@ -1139,7 +1262,42 @@ async function loadProviders(){
       <button class="btn-sm" onclick="exportProviderProducts(${p.id}, '${p.name.replace(/'/g,"")}')"><i class="fa-solid fa-file-arrow-down"></i> تحميل قائمة المنتجات</button>
       <button class="btn-sm danger" onclick="deleteProvider(${p.id})">حذف</button>
     </td></tr>`).join("")
-    || `<tr><td colspan="5" class="text-muted" style="text-align:center; padding:16px;">لا يوجد مزوّدون بعد</td></tr>`;
+    || `<tr><td colspan="6" class="text-muted" style="text-align:center; padding:16px;">لا يوجد مزوّدون بعد</td></tr>`;
+}
+
+async function refreshBalance(pid, btn){
+  const cell = document.getElementById("provBal_" + pid);
+  const origBtn = btn ? btn.innerHTML : "";
+  if(btn){ btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i>'; }
+  try{
+    const r = await adminFetch(`/admin/providers/${pid}/balance`);
+    if(r.ok){
+      if(cell) cell.innerHTML = `<b style="color:var(--success); font-family:'Orbitron',monospace; font-size:11px;">💰 ${r.balance}</b><br><small style="color:var(--muted); font-size:9px;">${r.cached_at||''}</small>
+        <button class="btn-sm" style="margin-top:4px;" onclick="refreshBalance(${pid}, this)"><i class="fa-solid fa-arrows-rotate"></i> تحديث</button>`;
+      toast("تم تحديث الرصيد ✅");
+    }else{
+      toast("تعذّر قراءة الرصيد الحي (" + (r.note || "?") + ")" + (r.balance ? " — المعروض آخر قراءة محفوظة" : ""), "error");
+      loadProviders();
+    }
+  }catch(err){ toast(err.message, "error"); }
+  finally{ if(btn && !cell){ btn.disabled = false; btn.innerHTML = origBtn; } }
+}
+
+async function refreshAllBalances(btn){
+  if(btn){ btn.disabled = true; btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> جاري تحديث الأرصدة...'; }
+  try{
+    const providers = await adminFetch("/admin/providers");
+    for(const p of providers){
+      try{
+        const r = await adminFetch(`/admin/providers/${p.id}/balance`);
+        const cell = document.getElementById("provBal_" + p.id);
+        if(cell && r.ok) cell.innerHTML = `<b style="color:var(--success); font-family:'Orbitron',monospace; font-size:11px;">💰 ${r.balance}</b><br><small style="color:var(--muted); font-size:9px;">${r.cached_at||''}</small>
+          <button class="btn-sm" style="margin-top:4px;" onclick="refreshBalance(${p.id}, this)"><i class="fa-solid fa-arrows-rotate"></i> تحديث</button>`;
+      }catch(e){ /* مزوّد واحد فاشل لا يوقف البقية */ }
+    }
+    toast("تم تحديث الأرصدة ✅");
+  }catch(err){ toast(err.message, "error"); }
+  finally{ if(btn){ btn.disabled = false; btn.innerHTML = '<i class="fa-solid fa-wallet"></i> تحديث كل الأرصدة'; } }
 }
 
 async function testProvider(pid, btn){
@@ -1148,7 +1306,8 @@ async function testProvider(pid, btn){
   try{
     const r = await adminFetch(`/admin/providers/${pid}/test`, { method:"POST" });
     const lines = (r.checks || []).map(c=>`• ${c.label}: ${c.verdict}\n  ${c.url}`).join("\n");
-    alert(`${r.message}\n\n${lines}\n\nالمنتجات المرصودة: ${r.products_found ?? 0}\nرابط الطلب: ${r.order_url}`);
+    const balLine = r.balance ? `\n💰 رصيد المزوّد: ${r.balance}` : (r.balance_note ? `\n💰 الرصيد: تعذّر (${r.balance_note})` : "");
+    alert(`${r.message}\n\n${lines}\n\nالمنتجات المرصودة: ${r.products_found ?? 0}\nرابط الطلب: ${r.order_url}${balLine}`);
     loadProviders();
   }catch(err){ toast(err.message, "error"); }
   finally{ if(btn){ btn.disabled = false; btn.innerHTML = orig; } }
@@ -1291,11 +1450,12 @@ async function addProvider(){
   const order_path = document.getElementById("providerOrderPath")?.value.trim() || "";
   const status_path = document.getElementById("providerStatusPath")?.value.trim() || "";
   const catalog_path = document.getElementById("providerCatalogPath")?.value.trim() || "";
+  const balance_path = document.getElementById("providerBalancePath")?.value.trim() || "";
   if(!name || !token || !url){ toast("عبّي الاسم والتوكن والرابط", "error"); return; }
   try{
-    await adminFetch("/admin/providers", { method:"POST", body: JSON.stringify({ name, token, url, order_path, status_path, catalog_path }) });
+    await adminFetch("/admin/providers", { method:"POST", body: JSON.stringify({ name, token, url, order_path, status_path, catalog_path, balance_path }) });
     toast("تمت إضافة المزوّد ✅");
-    ["providerName","providerToken","providerUrl","providerOrderPath","providerStatusPath","providerCatalogPath"].forEach(id=>{ const el = document.getElementById(id); if(el) el.value = ""; });
+    ["providerName","providerToken","providerUrl","providerOrderPath","providerStatusPath","providerCatalogPath","providerBalancePath"].forEach(id=>{ const el = document.getElementById(id); if(el) el.value = ""; });
     loadProviders();
   }catch(err){ toast(err.message, "error"); }
 }
@@ -1636,6 +1796,7 @@ async function loadShopOrders(){
   document.getElementById("shopOrdersBody").innerHTML = orders.map(o=>`
     <tr>
       <td>#${o.id}</td>
+      <td style="font-family:'Orbitron',monospace; font-size:10px; direction:ltr; cursor:pointer;" title="انقر للنسخ" onclick="navigator.clipboard?.writeText('${o.track||''}'); toast('تم نسخ رقم التتبع ✅')">${o.track||'-'}</td>
       <td>${o.user_id}</td>
       <td>${o.product_name}<br><small style="color:var(--muted)">${o.category_name}</small></td>
       <td>${o.player_id||'-'}</td>
@@ -1649,7 +1810,7 @@ async function loadShopOrders(){
         ` : '—'}
       </td>
     </tr>`).join("")
-  || `<tr><td colspan="7" class="text-muted" style="text-align:center; padding:16px;">لا توجد طلبات يدوية</td></tr>`;
+  || `<tr><td colspan="8" class="text-muted" style="text-align:center; padding:16px;">لا توجد طلبات يدوية</td></tr>`;
 }
 
 async function acceptShopOrder(id){

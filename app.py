@@ -348,7 +348,12 @@ def init_db():
                     "ALTER TABLE orders ADD COLUMN provider_id INTEGER DEFAULT NULL",
                     "ALTER TABLE providers ADD COLUMN order_path TEXT DEFAULT ''",
                     "ALTER TABLE providers ADD COLUMN status_path TEXT DEFAULT ''",
-                    "ALTER TABLE providers ADD COLUMN catalog_path TEXT DEFAULT ''"])
+                    "ALTER TABLE providers ADD COLUMN catalog_path TEXT DEFAULT ''",
+                    "ALTER TABLE providers ADD COLUMN balance_path TEXT DEFAULT ''",
+                    "ALTER TABLE providers ADD COLUMN balance_cache TEXT DEFAULT ''",
+                    "ALTER TABLE providers ADD COLUMN balance_at TEXT DEFAULT ''",
+                    "CREATE TABLE IF NOT EXISTS admin_logs(id INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT DEFAULT '', action TEXT DEFAULT '', target TEXT DEFAULT '', detail TEXT DEFAULT '', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+                    "UPDATE orders SET order_uuid=('TRK-'||id) WHERE order_uuid IS NULL OR order_uuid=''"])
         # settings defaults
         defaults = {"exchange_rate": "13800", "support_username": "aboudy2312",
                     "support_telegram": "https://t.me/aboudy2312", "support_whatsapp": "",
@@ -563,6 +568,17 @@ def notify(user_id, title, msg="", kind="info"):
     with get_db() as db:
         db.execute("INSERT INTO notifications(user_id,title,message,kind) VALUES(?,?,?,?)", (user_id, title, msg, kind))
 
+def alog(action, target="", detail=""):
+    """سجل نشاط الأدمن — يُستدعى من endpoints الإدارة بعد كل إجراء مهم."""
+    try:
+        ap = getattr(request, "ap", None) or {}
+        actor = "المالك 👑" if ap.get("owner") else "أدمن"
+        with get_db() as db:
+            db.execute("INSERT INTO admin_logs(actor,action,target,detail) VALUES(?,?,?,?)",
+                       (actor, action or "", target or "", (detail or "")[:500]))
+    except Exception:
+        pass
+
 # ---------- الجلسات في قاعدة البيانات (تعمل على كل النسخ حتى بدون ARAB_SECRET_KEY) ----------
 def issue_token(web_id, admin=False, owner=False):
     tok = secrets.token_urlsafe(32)
@@ -715,15 +731,24 @@ def _get_provider(pid):
     try:
         with get_db() as db:
             try:
-                r = db.execute("SELECT id,name,token,url,order_path,status_path,catalog_path FROM providers WHERE id=?", (pid,)).fetchone()
+                r = db.execute("SELECT id,name,token,url,order_path,status_path,catalog_path,balance_path,balance_cache,balance_at FROM providers WHERE id=?", (pid,)).fetchone()
                 if r:
                     return {"id": r[0], "name": r[1], "token": r[2] or "", "url": r[3] or "",
-                            "order_path": r[4] or "", "status_path": r[5] or "", "catalog_path": r[6] or ""}
+                            "order_path": r[4] or "", "status_path": r[5] or "", "catalog_path": r[6] or "",
+                            "balance_path": r[7] or "", "balance_cache": r[8] or "", "balance_at": r[9] or ""}
             except Exception:
-                r = db.execute("SELECT id,name,token,url FROM providers WHERE id=?", (pid,)).fetchone()
-                if r:
-                    return {"id": r[0], "name": r[1], "token": r[2] or "", "url": r[3] or "",
-                            "order_path": "", "status_path": "", "catalog_path": ""}
+                try:
+                    r = db.execute("SELECT id,name,token,url,order_path,status_path,catalog_path FROM providers WHERE id=?", (pid,)).fetchone()
+                    if r:
+                        return {"id": r[0], "name": r[1], "token": r[2] or "", "url": r[3] or "",
+                                "order_path": r[4] or "", "status_path": r[5] or "", "catalog_path": r[6] or "",
+                                "balance_path": "", "balance_cache": "", "balance_at": ""}
+                except Exception:
+                    r = db.execute("SELECT id,name,token,url FROM providers WHERE id=?", (pid,)).fetchone()
+                    if r:
+                        return {"id": r[0], "name": r[1], "token": r[2] or "", "url": r[3] or "",
+                                "order_path": "", "status_path": "", "catalog_path": "",
+                                "balance_path": "", "balance_cache": "", "balance_at": ""}
     except Exception:
         pass
     return None
@@ -803,6 +828,82 @@ def _shams_check(base, tok, porder):
         return "pending", reply[:500]
     return "pending", ""
 
+
+_BAL_KEYS = ("balance", "credit", "wallet", "funds", "money")
+_BAL_SKIP = ("price", "cost", "total", "spent", "paid", "fee", "discount", "sold")
+
+def _find_balance(obj, depth=0):
+    """يبحث بشكل متكرر عن أول قيمة رقمية بمفتاح يدل على الرصيد."""
+    if depth > 3 or obj is None:
+        return None
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            kl = str(k).lower()
+            if (any(bk in kl for bk in _BAL_KEYS) and not any(sk in kl for sk in _BAL_SKIP)
+                    and isinstance(v, (int, float)) and not isinstance(v, bool)):
+                return v
+        for v in obj.values():
+            r = _find_balance(v, depth + 1)
+            if r is not None:
+                return r
+    elif isinstance(obj, list):
+        for v in obj:
+            r = _find_balance(v, depth + 1)
+            if r is not None:
+                return r
+    return None
+
+def _fmt_balance(v):
+    try:
+        return (f"{v:,.2f}" if isinstance(v, float) else f"{int(v):,}")
+    except Exception:
+        return str(v)
+
+def _provider_balance(prov):
+    """يجلب رصيد المزوّد الحي — يرجع (ok, text, note).
+    يجرّب مسار الرصيد المخصص أولاً ثم مسارات شمس الشائعة، ويقرأ أول قيمة
+    رقمية بمفتاح يدل على الرصيد من أي رد JSON."""
+    import requests as _rq
+    tok = ((prov.get("token") or "") if isinstance(prov, dict) else "").strip()
+    base = (((prov.get("url") or "") if isinstance(prov, dict) else "").strip().rstrip("/") or "https://api.shams4store.com")
+    if not tok:
+        return False, "", "بلا توكن"
+    bpath = ((prov.get("balance_path") or "") if isinstance(prov, dict) else "").strip()
+    cands = []
+    if bpath:
+        cands.append(_pjoin(base, bpath, "/client/api/balance"))
+    for p in ("/client/api/profile", "/client/api/user", "/client/api/balance", "/client/api/wallet"):
+        if base + p not in cands:
+            cands.append(base + p)
+    last_note = ""
+    for url in cands:
+        for kw in ({"headers": {"api-token": tok}}, {"params": {"token": tok, "api_token": tok}}):
+            try:
+                r = _rq.get(url, timeout=8, **kw)
+            except Exception as e:
+                last_note = f"تعذّر الوصول: {e}"
+                continue
+            if not r.ok:
+                last_note = f"http-{r.status_code}"
+                continue
+            try:
+                d = r.json()
+            except Exception:
+                last_note = "رد غير JSON"
+                continue
+            if not isinstance(d, (dict, list)):
+                last_note = "شكل رد غير متوقع"
+                continue
+            if isinstance(d, dict) and str(d.get("status") or "").upper() not in ("OK", "SUCCESS", ""):
+                last_note = str(d.get("msg") or d.get("message") or "رفض المزوّد")[:120]
+                continue
+            found = _find_balance(d.get("data", d) if isinstance(d, dict) else d)
+            if found is not None:
+                return True, _fmt_balance(found), url
+            last_note = "لا يوجد حقل رصيد واضح في الرد"
+    if tok and last_note:
+        last_note = last_note.replace(tok, "***")
+    return False, "", last_note or "تعذّر قراءة الرصيد"
 
 def provider_buy(sku_row, player, qty, token=None, url=None, product_ref=None, order_path=""):
     """يرجع (ok, status, porder, resp) حيث status: completed|pending|failed.
@@ -1096,6 +1197,8 @@ def skus():
     return jsonify(out)
 
 def _insert_order(db, uid, pname, sname, price_usd, price_syp, player, qty, status, porder, resp, ouuid, cost_usd=0, provider_id=None):
+    if not (ouuid or "").strip():
+        ouuid = f"TRK-{uid}-{int(time.time())}"
     vals = (uid, pname, sname, price_usd, price_syp, player, qty, status, porder, (resp or "")[:500], ouuid, round(float(cost_usd or 0), 4), provider_id)
     try:
         cur = db.execute("INSERT INTO orders(user_id,product,sku,price_usd,price_syp,player,qty,status,provider_order,response,order_uuid,cost_usd,provider_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id" if USE_PG
@@ -1181,7 +1284,7 @@ def deposit():
 # ================= ORDERS =================
 def _serialize(uid):
     with get_db() as db:
-        rows = db.execute("SELECT id,product,sku,price_usd,price_syp,player,qty,status,provider_order,created_at FROM orders WHERE user_id=? ORDER BY id DESC LIMIT 100", (uid,)).fetchall()
+        rows = db.execute("SELECT id,product,sku,price_usd,price_syp,player,qty,status,provider_order,created_at,order_uuid FROM orders WHERE user_id=? ORDER BY id DESC LIMIT 100", (uid,)).fetchall()
     out = []
     for r in rows:
         po = r[8] or ""
@@ -1191,7 +1294,8 @@ def _serialize(uid):
         out.append({"id": r[0], "product": r[1], "product_name": r[1], "category": r[2], "category_name": r[2],
                  "price_usd": r[3], "price_syp": r[4], "player": r[5], "player_id": r[5],
                  "qty": r[6], "status": mapped, "raw_status": raw, "source": "api" if via else "shop",
-                 "provider_order": po, "date": str(r[9]), "created_at": str(r[9])})
+                 "provider_order": po, "date": str(r[9]), "created_at": str(r[9]),
+                 "track": (r[10] or f"TRK-{r[0]}")})
     return out
 
 @app.get("/api/orders")
@@ -1315,7 +1419,7 @@ def _parse_reply_items(reply):
 def order_detail(oid):
     uid = int(request.wu["site_user_id"] if "site_user_id" in request.wu.keys() else request.wu[4])
     with get_db() as db:
-        o = db.execute("SELECT id,product,sku,price_usd,price_syp,player,qty,status,provider_order,response,created_at FROM orders WHERE id=? AND user_id=?", (oid, uid)).fetchone()
+        o = db.execute("SELECT id,product,sku,price_usd,price_syp,player,qty,status,provider_order,response,created_at,order_uuid FROM orders WHERE id=? AND user_id=?", (oid, uid)).fetchone()
     if not o: return jsonify({"message": "الطلب غير موجود"}), 404
     raw = o[7]
     status = "accepted" if raw == "completed" else ("rejected" if raw == "failed" else "pending")
@@ -1332,6 +1436,7 @@ def order_detail(oid):
                     "source": "api" if via_provider else "shop",
                     "ext_order_id": porder if via_provider else "",
                     "provider_order": porder,
+                    "track": (o[11] or f"TRK-{o[0]}"),
                     "api_response": o[9] or "",
                     "reply_items": reply_items,
                     "has_reply": bool(reply_items),
@@ -1479,15 +1584,17 @@ def astats():
 @require_admin
 def aorders():
     with get_db() as db:
-        try: rows = db.execute("SELECT id,user_id,product,sku,price_usd,price_syp,player,qty,status,provider_order,created_at,kind FROM orders ORDER BY id DESC LIMIT 200").fetchall()
+        try: rows = db.execute("SELECT id,user_id,product,sku,price_usd,price_syp,player,qty,status,provider_order,created_at,kind,order_uuid FROM orders ORDER BY id DESC LIMIT 200").fetchall()
         except Exception: rows = db.execute("SELECT id,user_id,product,sku,price_usd,price_syp,player,qty,status,provider_order,created_at FROM orders ORDER BY id DESC LIMIT 200").fetchall()
     out = []
     for r in rows:
         kind = r[11] if len(r) > 11 else "shop"
+        track = (r[12] if len(r) > 12 and r[12] else f"TRK-{r[0]}")
         out.append({"id": r[0], "ref": f"S{r[0]}", "source": kind, "user_id": r[1],
                     "product": r[2], "product_name": r[2], "sku": r[3], "category": r[3], "category_name": r[3],
                     "price_usd": r[4], "price_syp": r[5], "player": r[6], "player_id": r[6],
-                    "qty": r[7], "status": r[8], "raw_status": r[8], "provider_order": r[9], "date": str(r[10]), "created_at": str(r[10])})
+                    "qty": r[7], "status": r[8], "raw_status": r[8], "provider_order": r[9], "date": str(r[10]), "created_at": str(r[10]),
+                    "track": track})
     return jsonify(out)
 
 @app.post("/api/admin/orders/<string:ref>/status")
@@ -1512,6 +1619,7 @@ def aorder_st(ref):
             notify(o[1], "تم رفض الطلب", "تم استرجاع رصيدك", "error")
         else:
             notify(o[1], "تم قبول طلبك ✅", o[3], "success")
+    alog("✅ قبول طلب" if st != "failed" else "❌ رفض طلب", f"S{o[0]}", o[3])
     return jsonify({"message": "تم ✅"})
 
 @app.get("/api/admin/deposits")
@@ -1535,10 +1643,78 @@ def adep_act(did, act):
             db.execute("UPDATE balances SET balance=balance+? WHERE user_id=?", (int(d[1]), d[0]))
             db.execute("INSERT INTO transactions(user_id,type,amount,note) VALUES(?, 'in', ?, ?)", (d[0], int(d[1]), f"قبول إيداع {d[2]}"))
             notify(d[0], "تم قبول إيداعك ✅", d[2], "success")
+            alog("✅ قبول إيداع", f"#{did}", f"{d[2]} — {int(d[1]):,} ل.س")
         else:
             db.execute("UPDATE deposit_requests SET status='rejected' WHERE id=?", (did,))
             notify(d[0], "تم رفض الإيداع", d[2], "error")
+            alog("❌ رفض إيداع", f"#{did}", d[2])
     return jsonify({"message": "تم ✅"})
+
+@app.get("/api/admin/logs")
+@require_admin
+def adm_logs():
+    """سجل نشاط الأدمن — الأحدث أولاً، مع بحث اختياري."""
+    try: limit = max(1, min(int(request.args.get("limit") or 200), 500))
+    except Exception: limit = 200
+    q = (request.args.get("q") or "").strip()
+    with get_db() as db:
+        try:
+            if q:
+                like = f"%{q.replace(chr(92), chr(92)*2).replace('%', chr(92)+'%').replace('_', chr(92)+'_')}%"
+                rows = db.execute("SELECT id,actor,action,target,detail,created_at FROM admin_logs "
+                                  "WHERE actor LIKE ? ESCAPE '\\' OR action LIKE ? ESCAPE '\\' OR target LIKE ? ESCAPE '\\' OR detail LIKE ? ESCAPE '\\' "
+                                  "ORDER BY id DESC LIMIT ?", (like, like, like, like, limit)).fetchall()
+            else:
+                rows = db.execute("SELECT id,actor,action,target,detail,created_at FROM admin_logs ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        except Exception:
+            return jsonify([])
+    return jsonify([{"id": r[0], "actor": r[1] or "", "action": r[2] or "", "target": r[3] or "",
+                     "detail": r[4] or "", "date": str(r[5])} for r in rows])
+
+@app.get("/api/admin/search")
+@require_admin
+def adm_search():
+    """بحث شامل: طلبات (رقم/تتبع/لاعب/منتج) + مستخدمون (اسم/إيميل/هاتف) + إيداعات (رقم/كود)."""
+    q = (request.args.get("q") or "").strip()
+    if len(q) < 2:
+        return jsonify({"orders": [], "users": [], "deposits": []})
+    like = f"%{q.replace(chr(92), chr(92)*2).replace('%', chr(92)+'%').replace('_', chr(92)+'_')}%"
+    out = {"orders": [], "users": [], "deposits": []}
+    with get_db() as db:
+        try:
+            orows = db.execute("SELECT id,product,player,status,order_uuid,provider_order FROM orders "
+                               "WHERE CAST(id AS TEXT) LIKE ? ESCAPE '\\' OR ('TRK-'||id) LIKE ? ESCAPE '\\' "
+                               "OR order_uuid LIKE ? ESCAPE '\\' "
+                               "OR provider_order LIKE ? ESCAPE '\\' OR player LIKE ? ESCAPE '\\' OR product LIKE ? ESCAPE '\\' "
+                               "ORDER BY id DESC LIMIT 10", (like,) * 6).fetchall()
+            out["orders"] = [{"id": r[0], "product": r[1] or "", "player": r[2] or "", "status": r[3] or "",
+                              "track": r[4] or f"TRK-{r[0]}", "provider_order": r[5] or ""} for r in orows]
+        except Exception:
+            pass
+        try:
+            urows = db.execute("SELECT id,name,email,phone,site_user_id FROM web_users "
+                               "WHERE name LIKE ? ESCAPE '\\' OR email LIKE ? ESCAPE '\\' OR phone LIKE ? ESCAPE '\\' "
+                               "OR CAST(site_user_id AS TEXT) LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT 10", (like,) * 4).fetchall()
+            out["users"] = [{"web_id": r[0], "name": r[1] or "", "email": r[2] or "", "phone": r[3] or "",
+                             "site_user_id": r[4]} for r in urows]
+        except Exception:
+            pass
+        try:
+            drows = db.execute("SELECT id,method,amount_syp,status,code FROM deposit_requests "
+                               "WHERE CAST(id AS TEXT) LIKE ? ESCAPE '\\' OR code LIKE ? ESCAPE '\\' "
+                               "OR invoice_ref LIKE ? ESCAPE '\\' ORDER BY id DESC LIMIT 10", (like,) * 3).fetchall()
+            out["deposits"] = [{"id": r[0], "method": r[1] or "", "amount_syp": r[2] or 0,
+                                "status": r[3] or "", "code": r[4] or ""} for r in drows]
+        except Exception:
+            try:
+                drows = db.execute("SELECT id,method,amount_syp,status,code FROM deposit_requests "
+                                   "WHERE CAST(id AS TEXT) LIKE ? ESCAPE '\\' OR code LIKE ? ESCAPE '\\' "
+                                   "ORDER BY id DESC LIMIT 10", (like,) * 2).fetchall()
+                out["deposits"] = [{"id": r[0], "method": r[1] or "", "amount_syp": r[2] or 0,
+                                    "status": r[3] or "", "code": r[4] or ""} for r in drows]
+            except Exception:
+                pass
+    return jsonify(out)
 
 @app.get("/api/admin/users")
 @require_admin
@@ -1575,6 +1751,11 @@ def abal(wid):
     uid = int(u["site_user_id"] if "site_user_id" in u.keys() else u[4])
     nb = add_balance(uid, amt, "تعديل أدمن")
     notify(uid, "تعديل رصيد 💰", f"{amt:+,} ل.س", "info")
+    try:
+        _em = u["email"] if "email" in u.keys() else u[2]
+    except Exception:
+        _em = ""
+    alog("💰 تعديل رصيد", _em or f"#{wid}", f"{amt:+,} ل.س")
     return jsonify({"message": "تم ✅", "new_balance_syp": nb})
 
 @app.post("/api/admin/users/<int:wid>/api")
@@ -1584,8 +1765,10 @@ def aapi(wid):
     with get_db() as db:
         if en:
             k = gen_key(); db.execute("UPDATE web_users SET api_key=?,api_enabled=1 WHERE id=?", (k, wid))
+            alog("🔑 تفعيل API", f"#{wid}")
             return jsonify({"message": "تم التفعيل ✅", "api_key": k})
         db.execute("UPDATE web_users SET api_enabled=0 WHERE id=?", (wid,))
+    alog("🔑 تعطيل API", f"#{wid}")
     return jsonify({"message": "تم التعطيل"})
 
 # catalog CRUD (sections/products/skus/methods/settings/banners)
@@ -1917,6 +2100,7 @@ def adm_set_get():
 def adm_set_save():
     b = request.get_json(force=True, silent=True) or {}
     for k, v in b.items(): set_setting(k, str(v))
+    alog("⚙️ حفظ الإعدادات", "", ",".join(sorted(b.keys()))[:200])
     return jsonify({"message": "تم الحفظ ✅"})
 
 @app.get("/api/admin/banners")
@@ -2089,6 +2273,11 @@ def adm_user_tier(wid):
             notify(uid, "مستوى خصم جديد 🎖️", "تم تفعيل خصم خاص لحسابك", "success")
         else:
             db.execute("DELETE FROM user_tier WHERE user_id=?", (uid,))
+    try:
+        _em = u["email"] if "email" in u.keys() else u[2]
+    except Exception:
+        _em = ""
+    alog("🎖️ تغيير رتبة", _em or f"#{wid}", f"tier={tid}")
     return jsonify({"message": "تم ✅"})
 
 # --- تفاصيل المستخدم + حظر ---
@@ -2116,6 +2305,7 @@ def adm_user_details(wid):
 def adm_user_block(wid):
     blocked = bool((request.get_json(force=True, silent=True) or {}).get("blocked", True))
     with get_db() as db: db.execute("UPDATE web_users SET blocked=? WHERE id=?", (1 if blocked else 0, wid))
+    alog("🚫 حظر مستخدم" if blocked else "✅ فك حظر", f"#{wid}")
     return jsonify({"message": "تم الحظر 🚫" if blocked else "تم فك الحظر ✅"})
 
 # --- طرق الإيداع CRUD ---
@@ -2195,6 +2385,7 @@ def adm_maint_set():
         set_setting("maintenance_enabled", "true"); set_setting("maintenance_ends_at", ends.isoformat())
     else:
         set_setting("maintenance_enabled", "false")
+    alog("🛠️ صيانة " + ("تفعيل" if en else "إيقاف"), "", f"{b.get('hours') or ''}h")
     return jsonify({"message": "تم الحفظ ✅"})
 
 # --- المشرفون (web_admins) ---
@@ -2286,7 +2477,7 @@ def adm_dm():
 EXTRA_SCHEMA = """
 CREATE TABLE IF NOT EXISTS link_codes(code TEXT PRIMARY KEY, web_user_id INTEGER, expires_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS push_subscriptions(id INTEGER PRIMARY KEY AUTOINCREMENT, user_id INTEGER, endpoint TEXT UNIQUE, p256dh TEXT, auth TEXT, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
-CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, token TEXT DEFAULT '', url TEXT DEFAULT '', order_path TEXT DEFAULT '', status_path TEXT DEFAULT '', catalog_path TEXT DEFAULT '');
+CREATE TABLE IF NOT EXISTS providers(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, token TEXT DEFAULT '', url TEXT DEFAULT '', order_path TEXT DEFAULT '', status_path TEXT DEFAULT '', catalog_path TEXT DEFAULT '', balance_path TEXT DEFAULT '', balance_cache TEXT DEFAULT '', balance_at TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS category_links(category_id INTEGER PRIMARY KEY, provider_id INTEGER, provider_product TEXT DEFAULT '');
 CREATE TABLE IF NOT EXISTS import_batches(id TEXT PRIMARY KEY, created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, items INTEGER DEFAULT 0);
 CREATE TABLE IF NOT EXISTS import_items(batch_id TEXT, kind TEXT, ref_id INTEGER);
@@ -2301,7 +2492,12 @@ def ensure_extra():
         # ترحيلات الجداول الإضافية (للقواعد القديمة — الجداول هنا موجودة حتماً)
         _run_idempotent(db, ["ALTER TABLE providers ADD COLUMN order_path TEXT DEFAULT ''",
                     "ALTER TABLE providers ADD COLUMN status_path TEXT DEFAULT ''",
-                    "ALTER TABLE providers ADD COLUMN catalog_path TEXT DEFAULT ''"])
+                    "ALTER TABLE providers ADD COLUMN catalog_path TEXT DEFAULT ''",
+                    "ALTER TABLE providers ADD COLUMN balance_path TEXT DEFAULT ''",
+                    "ALTER TABLE providers ADD COLUMN balance_cache TEXT DEFAULT ''",
+                    "ALTER TABLE providers ADD COLUMN balance_at TEXT DEFAULT ''",
+                    "CREATE TABLE IF NOT EXISTS admin_logs(id INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT DEFAULT '', action TEXT DEFAULT '', target TEXT DEFAULT '', detail TEXT DEFAULT '', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
+                    "UPDATE orders SET order_uuid=('TRK-'||id) WHERE order_uuid IS NULL OR order_uuid=''"])
         # الفهارس هنا بعد اكتمال كل الجداول (بما فيها auth_tokens وcategory_links).
         _run_idempotent(db, INDEXES)
 try:
@@ -2638,8 +2834,8 @@ def cl_check():
 @require_admin
 def adm_shop():
     with get_db() as db:
-        rows = db.execute("SELECT o.id,o.user_id,o.product,o.sku,o.price_usd,o.player,o.qty,o.status,o.created_at,w.email FROM orders o LEFT JOIN web_users w ON w.site_user_id=o.user_id ORDER BY o.id DESC LIMIT 200").fetchall()
-    return jsonify([{"id": r[0], "user_id": r[1], "email": r[9] or "", "product": r[2], "sku": r[3], "price_usd": r[4], "player": r[5], "qty": r[6], "status": r[7], "date": str(r[8])} for r in rows])
+        rows = db.execute("SELECT o.id,o.user_id,o.product,o.sku,o.price_usd,o.player,o.qty,o.status,o.created_at,w.email,o.order_uuid FROM orders o LEFT JOIN web_users w ON w.site_user_id=o.user_id ORDER BY o.id DESC LIMIT 200").fetchall()
+    return jsonify([{"id": r[0], "user_id": r[1], "email": r[9] or "", "product": r[2], "sku": r[3], "price_usd": r[4], "player": r[5], "qty": r[6], "status": r[7], "date": str(r[8]), "track": (r[10] or f"TRK-{r[0]}")} for r in rows])
 
 @app.post("/api/admin/shop-orders/<int:oid>/accept")
 @require_admin
@@ -2649,6 +2845,7 @@ def adm_shop_acc(oid):
         if not o: return jsonify({"message": "غير موجود"}), 404
         db.execute("UPDATE orders SET status='completed' WHERE id=?", (oid,))
         notify(o[0], "تم قبول طلبك ✅", o[1], "success")
+    alog("✅ قبول طلب يدوي", f"S{oid}", o[1])
     return jsonify({"message": "تم القبول ✅"})
 
 @app.post("/api/admin/shop-orders/<int:oid>/reject")
@@ -2660,6 +2857,7 @@ def adm_shop_rej(oid):
         db.execute("UPDATE orders SET status='failed' WHERE id=?", (oid,))
         add_balance(o[0], int(o[1] or 0), f"استرجاع رفض طلب {o[2]}")
         notify(o[0], "تم رفض الطلب", "تم استرجاع رصيدك", "error")
+    alog("❌ رفض طلب يدوي", f"S{oid}", o[2])
     return jsonify({"message": "تم الرفض واسترجاع الرصيد ✅"})
 
 @app.post("/api/admin/shop-orders/<int:oid>/execute")
@@ -2695,12 +2893,14 @@ def adm_shop_exec(oid):
 def adm_api_en(wid):
     k = gen_key()
     with get_db() as db: db.execute("UPDATE web_users SET api_key=?,api_enabled=1 WHERE id=?", (k, wid))
+    alog("🔑 تفعيل API", f"#{wid}")
     return jsonify({"message": "تم التفعيل ✅", "api_key": k})
 
 @app.post("/api/admin/users/<int:wid>/api/disable")
 @require_admin
 def adm_api_dis(wid):
     with get_db() as db: db.execute("UPDATE web_users SET api_enabled=0 WHERE id=?", (wid,))
+    alog("🔑 تعطيل API", f"#{wid}")
     return jsonify({"message": "تم التعطيل"})
 
 @app.post("/api/admin/users/<int:wid>/api/regenerate")
@@ -2708,12 +2908,14 @@ def adm_api_dis(wid):
 def adm_api_reg(wid):
     k = gen_key()
     with get_db() as db: db.execute("UPDATE web_users SET api_key=?,api_enabled=1 WHERE id=?", (k, wid))
+    alog("🔑 تجديد مفتاح API", f"#{wid}")
     return jsonify({"message": "تم ✅", "api_key": k})
 
 @app.post("/api/admin/users/<int:wid>/unblock")
 @require_admin
 def adm_unblock(wid):
     with get_db() as db: db.execute("UPDATE web_users SET blocked=0 WHERE id=?", (wid,))
+    alog("✅ فك حظر", f"#{wid}")
     return jsonify({"message": "تم فك الحظر ✅"})
 
 @app.post("/api/admin/users/<int:wid>/discount-tier")
@@ -2889,19 +3091,26 @@ def adm_unlink(cid):
 def adm_provs():
     with get_db() as db:
         try:
-            rows = db.execute("SELECT id,name,url,token,order_path,status_path,catalog_path FROM providers").fetchall()
-            full = True
+            rows = db.execute("SELECT id,name,url,token,order_path,status_path,catalog_path,balance_path,balance_cache,balance_at FROM providers").fetchall()
+            level = 2
         except Exception:
-            rows = db.execute("SELECT id,name,url,token FROM providers").fetchall()
-            full = False
+            try:
+                rows = db.execute("SELECT id,name,url,token,order_path,status_path,catalog_path FROM providers").fetchall()
+                level = 1
+            except Exception:
+                rows = db.execute("SELECT id,name,url,token FROM providers").fetchall()
+                level = 0
         out = []
         for r in rows:
             lc = db.execute("SELECT COUNT(*) FROM category_links WHERE provider_id=?", (r[0],)).fetchone()[0]
             out.append({"id": r[0], "name": r[1], "url": r[2] or "", "api_url": r[2] or "",
                         "has_token": bool(r[3]), "linked_products": lc,
-                        "order_path": (r[4] if full else "") or "",
-                        "status_path": (r[5] if full else "") or "",
-                        "catalog_path": (r[6] if full else "") or ""})
+                        "order_path": (r[4] if level >= 1 else "") or "",
+                        "status_path": (r[5] if level >= 1 else "") or "",
+                        "catalog_path": (r[6] if level >= 1 else "") or "",
+                        "balance_path": (r[7] if level >= 2 else "") or "",
+                        "balance": (r[8] if level >= 2 else "") or "",
+                        "balance_at": str(r[9] if level >= 2 else "" or "")})
     return jsonify(out)
 
 @app.post("/api/admin/providers")
@@ -2917,20 +3126,48 @@ def adm_provs_add():
     opath = (b.get("order_path") or "").strip()
     spath = (b.get("status_path") or "").strip()
     cpath = (b.get("catalog_path") or "").strip()
+    bpath = (b.get("balance_path") or "").strip()
     with get_db() as db:
         try:
-            db.execute("INSERT INTO providers(name,token,url,order_path,status_path,catalog_path) VALUES(?,?,?,?,?,?)",
-                       (name, tok, url, opath, spath, cpath))
+            db.execute("INSERT INTO providers(name,token,url,order_path,status_path,catalog_path,balance_path) VALUES(?,?,?,?,?,?,?)",
+                       (name, tok, url, opath, spath, cpath, bpath))
         except Exception:
-            db.execute("INSERT INTO providers(name,token,url) VALUES(?,?,?)", (name, tok, url))
+            try:
+                db.execute("INSERT INTO providers(name,token,url,order_path,status_path,catalog_path) VALUES(?,?,?,?,?,?)",
+                           (name, tok, url, opath, spath, cpath))
+            except Exception:
+                db.execute("INSERT INTO providers(name,token,url) VALUES(?,?,?)", (name, tok, url))
+    alog("➕ إضافة مزوّد", name, url)
     return jsonify({"message": "تمت إضافة المزوّد ✅"})
 
 @app.delete("/api/admin/providers/<int:pid>")
 @require_admin
 def adm_provs_del(pid):
     with get_db() as db:
+        pr = db.execute("SELECT name FROM providers WHERE id=?", (pid,)).fetchone()
         db.execute("DELETE FROM category_links WHERE provider_id=?", (pid,)); db.execute("DELETE FROM providers WHERE id=?", (pid,))
+    alog("🗑️ حذف مزوّد", (pr[0] if pr else f"#{pid}"))
     return jsonify({"message": "تم الحذف"})
+
+@app.get("/api/admin/providers/<int:pid>/balance")
+@require_admin
+def adm_prov_balance(pid):
+    """رصيد المزوّد الحي — يُجلب عند الطلب ويُحفظ كآخر قراءة."""
+    prov = _get_provider(pid)
+    if not prov:
+        return jsonify({"message": "المزوّد غير موجود"}), 404
+    ok, text, note = _provider_balance(prov)
+    if ok:
+        try:
+            with get_db() as db:
+                db.execute("UPDATE providers SET balance_cache=?, balance_at=CURRENT_TIMESTAMP WHERE id=?", (text, pid))
+        except Exception:
+            pass
+        return jsonify({"ok": True, "balance": text, "note": note,
+                        "cached_at": datetime.now().strftime("%Y-%m-%d %H:%M")})
+    return jsonify({"ok": False, "balance": prov.get("balance_cache") or "", "note": note,
+                    "cached_at": str(prov.get("balance_at") or ""),
+                    "message": f"تعذّر قراءة الرصيد الحي ({note}) — المعروض آخر قراءة محفوظة إن وُجدت"}), 200
 
 def _provider_products(prov):
     try:
@@ -3037,6 +3274,10 @@ def adm_prov_test(pid):
     except Exception:
         pass
     all_ok = all(c["ok"] for c in checks)
+    try:
+        _bok, _btext, _bnote = _provider_balance(prov)
+    except Exception:
+        _bok, _btext, _bnote = False, "", "خطأ داخلي"
     return jsonify({
         "message": "الاتصال سليم ✅ — المسارات تعمل" if all_ok else "يوجد خلل — راجع تفاصيل الفحص بالأسفل",
         "ok": all_ok,
@@ -3045,6 +3286,8 @@ def adm_prov_test(pid):
         "status_url": _pjoin(base, spath, "/api/order-status") if spath else base + "/client/api/check",
         "products_found": n_products,
         "checks": checks,
+        "balance": _btext if _bok else "",
+        "balance_note": "" if _bok else _bnote,
     })
 
 
