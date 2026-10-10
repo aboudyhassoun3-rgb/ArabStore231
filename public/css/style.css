@@ -266,11 +266,30 @@ img{ max-width:100%; display:block; }
   padding:18px 14px; text-align:center; margin-bottom:14px;
 }
 .drawer-avatar{
-  width:60px; height:60px; border-radius:50%; margin:0 auto 10px;
+  width:64px; height:64px; border-radius:50%; margin:0 auto 10px;
   background:linear-gradient(145deg, var(--accent), var(--accent-dim));
   display:flex; align-items:center; justify-content:center;
   font-size:22px; color:#fff; border:2px solid var(--border);
   box-shadow:0 0 18px var(--accent-soft);
+  overflow:hidden; position:relative; flex-shrink:0;
+}
+/* صورة البريد الأصلية (Gravatar) — تملأ الدائرة بشكل جميل */
+.drawer-avatar img.avatar-photo{
+  width:100%; height:100%; object-fit:cover; display:block; background:#fff;
+}
+/* شعار Gmail الرسمي كبديل — بخلفية بيضاء وحشوة مناسبة ليظهر واضحاً وجميلاً */
+.drawer-avatar.has-gmail{
+  background:#ffffff; border-color:#e5e7eb;
+  box-shadow:0 4px 16px rgba(66,133,244,.22), 0 0 0 3px rgba(234,67,53,.08);
+}
+.drawer-avatar img.avatar-gmail{
+  width:100%; height:100%; object-fit:contain; display:block;
+  background:#ffffff; padding:11px;
+}
+/* حرف أول جميل أثناء تحميل الصورة الأصلية */
+.drawer-avatar .avatar-letter{
+  font-size:24px; font-weight:800; color:#fff; line-height:1;
+  text-transform:uppercase; font-family:inherit;
 }
 .drawer-user-name{ font-weight:800; font-size:14px; display:flex; align-items:center; justify-content:center; gap:6px; flex-wrap:wrap; }
 .drawer-user-email{ font-size:10.5px; color:var(--muted); margin:4px 0 12px; }
