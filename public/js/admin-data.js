@@ -152,56 +152,75 @@ async function bulkAiImages(){
   if(btn) btn.disabled = true;
   wrap.style.display = "block";
   failsBox.textContent = "";
+  const SCOPES = [
+    {key: "products", box: "scopeProducts", label: "المنتجات"},
+    {key: "categories", box: "scopeCategories", label: "الفئات"},
+    {key: "subsections", box: "scopeSubsections", label: "الفروع"},
+  ].filter(s => { const el = document.getElementById(s.box); return el && el.checked; });
+  if(!SCOPES.length){
+    toast("اختر نوعاً واحداً على الأقل: منتجات / فئات / فروع", "error");
+    bulkAiRunning = false;
+    if(btn) btn.disabled = false;
+    return;
+  }
   let doneTotal = 0, failSeen = new Set(), grand = null, retries = 0, deadRounds = 0;
   const LIMIT = 2;
   try{
-    while(bulkAiRunning){
-      label.textContent = `جاري التوليد… تم ${doneTotal}${grand ? " / " + grand : ""} ⏳`;
-      let res;
-      try{
-        // offset=0 دائماً: الباكند يعطي أول دفعة من المتبقي (المعالَج يخرج من القائمة)
-        res = await adminFetch("/admin/catalog/brand-images/bulk", {
-          method:"POST", body: JSON.stringify({ limit: LIMIT, offset: 0 })
+    for(const sc of SCOPES){
+      if(!bulkAiRunning) break;
+      let scopeGrand = null;
+      while(bulkAiRunning){
+        label.textContent = `جاري التوليد (${sc.label})… تم ${doneTotal}${grand ? " / " + grand : ""} ⏳`;
+        let res;
+        try{
+          // offset=0 دائماً: الباكند يعطي أول دفعة من المتبقي (المعالَج يخرج من القائمة)
+          res = await adminFetch("/admin/catalog/brand-images/bulk", {
+            method:"POST", body: JSON.stringify({ limit: LIMIT, offset: 0, scope: sc.key })
+          });
+          retries = 0;
+        }catch(err){
+          // محاولة أخيرة واحدة قبل التوقف (انقطاع لحظي / مهلة Vercel)
+          if(++retries > 1) throw err;
+          label.textContent = "انقطاع لحظي — إعادة المحاولة… ⏳";
+          await new Promise(r=>setTimeout(r, 2500));
+          continue;
+        }
+        doneTotal += (res.updated || 0);
+        const scopeTotal = doneTotal + (res.total || 0) - (grandBase(doneTotal, grand, sc) || 0);
+        if(scopeGrand === null) scopeGrand = (res.total || 0);
+        if(grand === null) grand = 0;
+        grand = grandBase(doneTotal, grand, sc, res, scopeGrand);
+        (res.failed || []).forEach(f=>{
+          const k = sc.key[0] + f.id;
+          if(!failSeen.has(k)){
+            failSeen.add(k);
+            failsBox.innerHTML += `<div>⚠️ [${sc.label}] ${escapeHtml(f.name || ("#" + f.id))}: ${escapeHtml(f.error || "")}</div>`;
+          }
         });
-        retries = 0;
-      }catch(err){
-        // محاولة أخيرة واحدة قبل التوقف (انقطاع لحظي / مهلة Vercel)
-        if(++retries > 1) throw err;
-        label.textContent = "انقطاع لحظي — إعادة المحاولة… ⏳";
-        await new Promise(r=>setTimeout(r, 2500));
-        continue;
-      }
-      doneTotal += (res.updated || 0);
-      if(grand === null) grand = doneTotal + (res.total || 0);
-      (res.failed || []).forEach(f=>{
-        const k = "p" + f.id;
-        if(!failSeen.has(k)){
-          failSeen.add(k);
-          failsBox.innerHTML += `<div>⚠️ ${escapeHtml(f.name || ("#" + f.id))}: ${escapeHtml(f.error || "")}</div>`;
+        const pct = grand ? Math.min(100, Math.round(doneTotal / grand * 100)) : 100;
+        bar.style.width = pct + "%";
+        label.textContent = `تم ${doneTotal}${grand ? " / " + grand : ""} ✅ (${sc.label})`;
+        if(res.done) break;
+        if((res.updated || 0) === 0 && (res.failed || []).length > 0){
+          // دفعة فاشلة بالكامل (API متوقف مثلاً) — لا تدور للأبد
+          if(++deadRounds >= 3){
+            label.textContent = "توقف: 3 دفعات فاشلة متتالية — تحقق من API الصور ثم أعد التشغيل";
+            toast("توقف التوليد: فشل متكرر — تحقق من API الصور", "error");
+            break;
+          }
+        }else{
+          deadRounds = 0;
         }
-      });
-      const pct = grand ? Math.min(100, Math.round(doneTotal / grand * 100)) : 100;
-      bar.style.width = pct + "%";
-      label.textContent = `تم ${doneTotal}${grand ? " / " + grand : ""} ✅`;
-      if(res.done) break;
-      if((res.updated || 0) === 0 && (res.failed || []).length > 0){
-        // دفعة فاشلة بالكامل (API متوقف مثلاً) — لا تدور للأبد
-        if(++deadRounds >= 3){
-          label.textContent = "توقف: 3 دفعات فاشلة متتالية — تحقق من API الصور ثم أعد التشغيل";
-          toast("توقف التوليد: فشل متكرر — تحقق من API الصور", "error");
-          break;
-        }
-      }else{
-        deadRounds = 0;
+        await new Promise(r=>setTimeout(r, 800));
       }
-      await new Promise(r=>setTimeout(r, 800));
+      if(deadRounds >= 3) break;
     }
     if(!bulkAiRunning){
       toast("تم إيقاف التوليد الجماعي", "error");
     }else if(deadRounds < 3){
       bar.style.width = "100%";
-      label.textContent = `اكتمل التوليد الجماعي ✅ (${doneTotal} منتج، فشل ${failSeen.size})`;
-      toast(`اكتمل التوليد الجماعي ✅ (${doneTotal} منتج)`);
+      label.textContent = `اكتمل التوليد الجماعي ✅ (${doneTotal} عنصر، فشل ${failSeen.size})`;
+      toast(`اكتمل التوليد الجماعي ✅ (${doneTotal} عنصر)`);
       loadProducts();
     }
   }catch(err){
@@ -212,6 +231,7 @@ async function bulkAiImages(){
     if(btn) btn.disabled = false;
   }
 }
+function grandBase(){ return 0; }
 
 const STATUS_LABEL = { processing:"قيد التنفيذ", completed:"مكتمل", failed:"فشل", pending:"بإنتظار المراجعة" };
 

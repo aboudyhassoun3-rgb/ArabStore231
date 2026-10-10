@@ -182,6 +182,64 @@ def save_svg_bytes(svg_text, filename):
         fh.write(data)
     return f"/uploads/{name}"
 
+def save_png_bytes(data, filename):
+    """يحفظ PNG (مختوم الشعار) في Supabase أو محلياً + نسخة DB دائمة. يرجع الرابط أو ''."""
+    import uuid as _uuid
+    name = secure_filename(filename or f"{_uuid.uuid4().hex}.png")
+    if not name.lower().endswith(".png"):
+        name += ".png"
+    mime = "image/png"
+    surl, skey = os.environ.get("SUPABASE_URL", "").strip().rstrip("/"), os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+    bucket = os.environ.get("ARAB_STORAGE_BUCKET", "store-assets").strip() or "store-assets"
+    if surl and skey:
+        try:
+            import requests as _rq
+            r = _rq.post(f"{surl}/storage/v1/object/{bucket}/{name}",
+                         headers={"Authorization": f"Bearer {skey}", "apikey": skey,
+                                  "Content-Type": mime, "x-upsert": "true"},
+                         data=data, timeout=8)
+            r.raise_for_status()
+            return f"{surl}/storage/v1/object/public/{bucket}/{name}"
+        except Exception:
+            pass
+    try:
+        with open(os.path.join(UPLOAD_DIR, name), "wb") as fh:
+            fh.write(data)
+    except Exception:
+        return ""
+    _put_site_file(name, data, mime)
+    return f"/uploads/{name}"
+
+
+def fetch_stamp_save(img_url):
+    """يجلب صورة API خارجي، يختم عليها شعار المتجر، ويحفظها دائماً.
+    يرجع (final_url, stamped:bool, note). عند أي فشل يرجع الرابط الأصلي."""
+    try:
+        import requests as _rq
+        r = _rq.get(img_url, timeout=15)
+        r.raise_for_status()
+        ctype = (r.headers.get("Content-Type") or "").split(";")[0].strip().lower()
+        if ctype and not ctype.startswith("image/"):
+            return img_url, False, "not-image"
+        data = r.content
+        if not data or len(data) > 12 * 1024 * 1024:
+            return img_url, False, "bad-size"
+    except Exception as e:
+        return img_url, False, f"download-failed: {e}"
+    try:
+        from branding import stamp_store_badge
+        stamped = stamp_store_badge(data)
+    except Exception:
+        stamped = None
+    if not stamped:
+        return img_url, False, "stamp-unavailable"
+    import uuid as _uuid
+    saved = save_png_bytes(stamped, f"ai-{_uuid.uuid4().hex}.png")
+    if not saved:
+        return img_url, False, "save-failed"
+    return saved, True, "stamped"
+
+
 def branded_image_url(product_name, store_name=None):
     """صورة تلقائية للمنتج: تدرّج + إيموجي + الاسم + شريط المتجر. ترجع '' عند الفشل."""
     try:
@@ -3394,6 +3452,13 @@ def adm_brand_images_bulk():
     except (TypeError, ValueError):
         offset = 0
     force = bool(b.get("force"))
+    scope = (b.get("scope") or "products").strip().lower()
+    SCOPE_TABLES = {"products": ("products", "product"),
+                    "categories": ("skus", "category"),
+                    "subsections": ("subsections", "subsection")}
+    if scope not in SCOPE_TABLES:
+        return jsonify({"message": "النطاق غير صالح"}), 400
+    table, kind = SCOPE_TABLES[scope]
     url = (get_setting("ai_image_api_url", "") or "").strip()
     key = (get_setting("ai_image_api_key", "") or "").strip()
     if not url or not key:
@@ -3405,40 +3470,48 @@ def adm_brand_images_bulk():
     import requests as _rq
     with get_db() as db:
         if force:
-            rows = db.execute("SELECT id,name,image FROM products ORDER BY id LIMIT ? OFFSET ?",
+            rows = db.execute(f"SELECT id,name,image FROM {table} ORDER BY id LIMIT ? OFFSET ?",
                               (limit + 1, offset)).fetchall()
         else:
             # دائماً أول دفعة من المتبقي — لأن المعالَج يخرج من قائمة المرشحين،
             # والـ offset المتزايد كان يتخطى عناصر (خلل تم إصلاحه)
-            rows = db.execute("SELECT id,name,image FROM products ORDER BY id").fetchall()
+            rows = db.execute(f"SELECT id,name,image FROM {table} ORDER BY id").fetchall()
             rows = [r for r in rows if _needs_api_image(r[2] if len(r) > 2 else "")]
             rows = rows[:limit + 1]
+    # اسم المنتج الأب للفئات — لرسائل أوضح عند الفشل
+    parents = {}
+    if scope == "categories":
+        with get_db() as db:
+            for r in db.execute("SELECT s.id,p.name FROM skus s LEFT JOIN products p ON p.id=s.product_id").fetchall():
+                parents[r[0]] = r[1] or ""
     batch, extra = rows[:limit], rows[limit:]
     updated, failed = 0, []
     for pid, name, _img in batch:
         try:
-            prompt_en, negative_en = image_prompt_payload("product", name or "product")
+            prompt_en, negative_en = image_prompt_payload(kind, name or "product")
             r = _rq.post(url, json={"prompt": prompt_en, "negative_prompt": negative_en, "key": key}, timeout=20)
             ok, img, err = _extract_ai_image(r)
         except Exception as e:
             ok, img, err = False, "", f"تعذّر الاتصال: {e}"
         if ok and img:
+            final, stamped, _note = fetch_stamp_save(img)
             with get_db() as db:
-                db.execute("UPDATE products SET image=? WHERE id=?", (img, pid))
+                db.execute(f"UPDATE {table} SET image=? WHERE id=?", (final, pid))
             updated += 1
         else:
-            failed.append({"id": pid, "name": name, "error": err or "فشل غير معروف"})
+            label = name if scope != "categories" or not parents.get(pid) else f"{name} ({parents[pid]})"
+            failed.append({"id": pid, "name": label, "error": err or "فشل غير معروف"})
     done = not extra
     # المتبقي بعد هذه الدفعة — الواجهة تشتق الإجمالي الثابت من أول رد
     # (doneTotal + remaining)، لأن أي إجمالي يُحسب هنا سينكمش حتماً
     with get_db() as db:
         if force:
-            total_now = db.execute("SELECT COUNT(*) FROM products").fetchone()[0]
+            total_now = db.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
         else:
-            all_rows = db.execute("SELECT image FROM products").fetchall()
+            all_rows = db.execute(f"SELECT image FROM {table}").fetchall()
             total_now = sum(1 for r in all_rows if _needs_api_image(r[0]))
     return jsonify({"message": f"الدفعة: نجح {updated} وفشل {len(failed)}",
-                    "updated": updated, "failed": failed,
+                    "updated": updated, "failed": failed, "scope": scope,
                     "total": total_now, "remaining": total_now, "next_offset": offset + limit,
                     "done": done})
 
@@ -3519,8 +3592,14 @@ def ai_gen():
             r = _rq.post(url, json={"prompt": prompt, "negative_prompt": negative_en, "key": key}, timeout=25)
             ok, img, err_detail = _extract_ai_image(r)
             if ok:
-                return jsonify({"message": "تم التوليد عبر API ✅", "image": img, "url": img,
-                                "prompt": prompt, "name_en": name_en, "brand": brand_info})
+                final, stamped, note = fetch_stamp_save(img)
+                if stamped:
+                    msg = "تم التوليد عبر API مع شعار المتجر ✅"
+                else:
+                    msg = f"تم التوليد عبر API ✅ (تعذّر ختم الشعار: {note})"
+                return jsonify({"message": msg, "image": final, "url": final,
+                                "prompt": prompt, "name_en": name_en, "brand": brand_info,
+                                "stamped": stamped})
         except Exception as e:
             err_detail = f"تعذّر الاتصال بخدمة توليد الصور: {e}"
     # fallback: توليد محلي بهوية المتجر حتى لا يبقى المستخدم بلا صورة
