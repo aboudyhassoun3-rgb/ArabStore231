@@ -22,7 +22,7 @@ const SECTION_LOADERS = {
   "smart-admin": ()=>Promise.all([loadProviders(), loadPricing()]),
   backup: ()=>Promise.all([loadBackups(), loadSnaps()]),
   logs: loadAdminLogs,
-  "ai-agent": loadAiAgent,
+  "ai-agent": ()=>Promise.all([loadAiAgent(), loadAiMemory()]),
 };
 async function changeAdminPassword(){
   const cur = document.getElementById("admCurPw").value, nw = document.getElementById("admNewPw").value;
@@ -568,6 +568,35 @@ async function testAiAgent(btn){
   }catch(err){ box.textContent = err.message; toast(err.message, "error"); }
   finally{ if(btn) btn.disabled = false; }
 }
+/* ===== ذاكرة الوكيل 🧠 ===== */
+let ALL_AI_MEM = [];
+async function loadAiMemory(){
+  try{
+    const d = await adminFetch("/admin/ai-memory?limit=150");
+    ALL_AI_MEM = d.items || [];
+    document.getElementById("aiMemCount").textContent = `🧠 ${d.total || 0} محادثة محفوظة`;
+  }catch(err){ ALL_AI_MEM = []; toast(err.message, "error"); }
+  renderAiMemory();
+}
+function renderAiMemory(){
+  const q = (document.getElementById("aiMemSearchInput")?.value || "").trim().toLowerCase();
+  const rows = ALL_AI_MEM.filter(m => !q || `${m.question||''} ${m.reply||''}`.toLowerCase().includes(q));
+  document.getElementById("aiMemTableBody").innerHTML = rows.map(m=>`
+    <tr><td style="font-size:10px; white-space:nowrap;">${m.date||''}</td>
+    <td style="font-size:11px;">${m.question||''}</td>
+    <td style="font-size:10.5px; color:var(--muted); max-width:280px;">${(m.reply||'').slice(0,160)}${(m.reply||'').length > 160 ? '…' : ''}</td>
+    <td><button class="btn-sm danger" onclick="deleteAiMemory(${m.id})"><i class="fa-solid fa-xmark"></i></button></td></tr>`).join("")
+    || `<tr><td colspan="4" class="text-muted" style="text-align:center; padding:16px;">لا توجد محادثات بعد</td></tr>`;
+}
+async function deleteAiMemory(id){
+  try{ await adminFetch("/admin/ai-memory", { method:"DELETE", body: JSON.stringify({ id }) }); loadAiMemory(); }
+  catch(err){ toast(err.message, "error"); }
+}
+async function clearAiMemory(){
+  if(!confirm("مسح كل ذاكرة الوكيل؟")) return;
+  try{ await adminFetch("/admin/ai-memory", { method:"DELETE", body: JSON.stringify({}) }); toast("تم المسح ✅"); loadAiMemory(); }
+  catch(err){ toast(err.message, "error"); }
+}
 
 /* ===== البحث الشامل (طلب / مستخدم / إيداع) ===== */
 let _globalSearchTimer = null;
@@ -838,26 +867,40 @@ async function setUserDiscountTier(webId, tierId){
 async function loadDiscountTiers(){
   const tiers = await adminFetch("/admin/discount-tiers");
   ALL_DISCOUNT_TIERS = tiers;
+  try{
+    const cfg = await adminFetch("/admin/settings");
+    const cb = document.getElementById("autoTierEnabled");
+    if(cb) cb.checked = (cfg.auto_tier_enabled === "true");
+  }catch(e){}
   document.getElementById("tiersTableBody").innerHTML = tiers.map(t => `
     <tr>
       <td><input type="text" value="${t.name}" onchange="updateDiscountTier(${t.id}, {name:this.value})" style="padding:6px 8px; border-radius:8px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); font-size:11px; width:100px;"></td>
       <td><input type="number" value="${t.percent}" min="0" max="100" step="0.5" onchange="updateDiscountTier(${t.id}, {percent:Number(this.value)})" style="padding:6px 8px; border-radius:8px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); font-size:11px; width:70px;"> %</td>
+      <td><input type="number" value="${t.min_spent || 0}" min="0" step="1" onchange="updateDiscountTier(${t.id}, {min_spent:Number(this.value)})" title="حد الإنفاق بالدولار للترقية التلقائية" style="padding:6px 8px; border-radius:8px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); font-size:11px; width:80px;"> $</td>
       <td><input type="number" value="${t.sort_order}" onchange="updateDiscountTier(${t.id}, {sort_order:Number(this.value)})" style="padding:6px 8px; border-radius:8px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); font-size:11px; width:60px;"></td>
       <td><button class="btn-sm danger" onclick="deleteDiscountTier(${t.id})">حذف</button></td>
     </tr>`).join("")
-    || `<tr><td colspan="4" class="text-muted" style="text-align:center; padding:16px;">لا توجد رتب بعد، أضف أول رتبة فوق</td></tr>`;
+    || `<tr><td colspan="5" class="text-muted" style="text-align:center; padding:16px;">لا توجد رتب بعد، أضف أول رتبة فوق</td></tr>`;
+}
+async function saveAutoTier(on){
+  try{
+    await adminFetch("/admin/settings", { method:"POST", body: JSON.stringify({ auto_tier_enabled: on ? "true" : "false" }) });
+    toast(on ? "تم تفعيل الترقية التلقائية ⚡" : "تم إيقاف الترقية التلقائية");
+  }catch(err){ toast(err.message, "error"); loadDiscountTiers(); }
 }
 async function addDiscountTier(){
   const name = document.getElementById("newTierName").value.trim();
   const percent = Number(document.getElementById("newTierPercent").value || 0);
+  const min_spent = Number(document.getElementById("newTierMinSpent")?.value || 0);
   const sort_order = Number(document.getElementById("newTierSort").value || 0);
   if(!name){ toast("أدخل اسم الرتبة", "error"); return; }
   if(percent < 0 || percent > 100){ toast("نسبة الخصم يجب أن تكون بين 0 و100", "error"); return; }
   try{
-    await adminFetch("/admin/discount-tiers", { method:"POST", body: JSON.stringify({ name, percent, sort_order }) });
+    await adminFetch("/admin/discount-tiers", { method:"POST", body: JSON.stringify({ name, percent, min_spent, sort_order }) });
     toast("تمت إضافة الرتبة ✅");
     document.getElementById("newTierName").value = "";
     document.getElementById("newTierPercent").value = "";
+    if(document.getElementById("newTierMinSpent")) document.getElementById("newTierMinSpent").value = "";
     document.getElementById("newTierSort").value = "0";
     loadDiscountTiers();
   }catch(err){ toast(err.message, "error"); }

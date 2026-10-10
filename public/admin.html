@@ -10,7 +10,7 @@
 <meta name="theme-color" content="#e63946">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
-<link rel="stylesheet" href="css/style.css?v=25">
+<link rel="stylesheet" href="css/style.css?v=26">
 <style>
   body{ padding-bottom:0; }
   .admin-section{ display:none; }
@@ -515,10 +515,20 @@
     <!-- ========== 5) المستويات ========== -->
     <section class="admin-section" id="sec-discount-tiers">
       <div class="panel">
+        <div class="panel-head"><h3>⚡ الترقية التلقائية للرتب</h3></div>
+        <div class="field-hint" style="margin-bottom:10px;">عند التفعيل: أي مستخدم يتجاوز مجموع مشترياته المكتملة <b>حد الإنفاق</b> لرتبة يُرقّى وحده فوراً مع إشعار 🎖️ — ترقية فقط ولا تخفيض أبداً (رتبتك اليدوية الأعلى محفوظة).</div>
+        <div class="field" style="display:flex; align-items:center; gap:8px; flex-direction:row-reverse; justify-content:flex-end;">
+          <label for="autoTierEnabled" style="margin:0;">تفعيل الترقية التلقائية</label>
+          <input type="checkbox" id="autoTierEnabled" onchange="saveAutoTier(this.checked)" style="width:18px; height:18px;">
+        </div>
+      </div>
+
+      <div class="panel">
         <div class="panel-head"><h3>إضافة رتبة جديدة</h3></div>
         <div class="admin-fields-grid">
           <div class="field"><label>اسم الرتبة</label><input type="text" id="newTierName" placeholder="مثال: VIP2" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);"></div>
           <div class="field"><label>نسبة الخصم %</label><input type="number" id="newTierPercent" placeholder="مثال: 10" min="0" max="100" step="0.5" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);"></div>
+          <div class="field"><label>حد الإنفاق للترقية التلقائية ($)</label><input type="number" id="newTierMinSpent" placeholder="مثال: 100" min="0" step="1" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);"></div>
           <div class="field"><label>ترتيب العرض</label><input type="number" id="newTierSort" placeholder="0" value="0" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);"></div>
         </div>
         <button class="btn btn-primary mt-10" style="width:auto; padding:11px 22px;" onclick="addDiscountTier()"><i class="fa-solid fa-plus"></i> إضافة الرتبة</button>
@@ -528,7 +538,7 @@
         <div class="panel-head"><h3>الرتب الحالية</h3><span class="text-muted" style="font-size:10.5px;">النسبة العامة تُطبق على كل الأقسام ما لم تخصص نسبة لقسم بالأسفل</span></div>
         <div class="table-scroll">
           <table class="data-table">
-            <thead><tr><th>الرتبة</th><th>نسبة الخصم</th><th>ترتيب العرض</th><th>إجراء</th></tr></thead>
+            <thead><tr><th>الرتبة</th><th>نسبة الخصم</th><th>حد الإنفاق $</th><th>ترتيب العرض</th><th>إجراء</th></tr></thead>
             <tbody id="tiersTableBody"></tbody>
           </table>
         </div>
@@ -770,6 +780,25 @@
         </div>
         <div id="aiTestResult" class="field-hint mt-10" style="white-space:pre-line;"></div>
       </div>
+
+      <div class="panel">
+        <div class="panel-head"><h3>🧠 ذاكرة الوكيل — ماذا سأله المستخدمون؟</h3><span class="text-muted" id="aiMemCount" style="font-size:11px;">—</span></div>
+        <div class="field-hint" style="margin-bottom:10px;">راجع الأسئلة التي عجز عنها الوكيل وحسّن <b>البرومبت المخصص</b> بالأعلى بناءً عليها. يُحفظ آخر 300 محادثة فقط.</div>
+        <div class="search-row" style="margin-bottom:10px;">
+          <button class="search-btn" onclick="renderAiMemory()"><i class="fa-solid fa-magnifying-glass"></i></button>
+          <input type="text" id="aiMemSearchInput" placeholder="بحث في الأسئلة والأجوبة..." oninput="renderAiMemory()">
+        </div>
+        <div style="display:flex; gap:8px; margin-bottom:10px; flex-wrap:wrap;">
+          <button class="btn-sm" onclick="loadAiMemory()"><i class="fa-solid fa-arrows-rotate"></i> تحديث</button>
+          <button class="btn-sm danger" onclick="clearAiMemory()"><i class="fa-solid fa-trash"></i> مسح الذاكرة</button>
+        </div>
+        <div class="table-scroll">
+          <table class="data-table">
+            <thead><tr><th>الوقت</th><th>السؤال</th><th>رد الوكيل</th><th></th></tr></thead>
+            <tbody id="aiMemTableBody"><tr><td colspan="4">...</td></tr></tbody>
+          </table>
+        </div>
+      </div>
     </section>
 
     <section class="admin-section" id="sec-smart-admin">
@@ -976,7 +1005,7 @@
 </div>
 
 
-<script src="js/app.js?v=7"></script>
+<script src="js/app.js?v=8"></script>
 <script>
   const ADMIN_TOKEN_KEY = "admin_token";
 
@@ -1035,6 +1064,6 @@
     }
   });
 </script>
-<script src="js/admin-data.js?v=9"></script>
+<script src="js/admin-data.js?v=10"></script>
 </body>
 </html>

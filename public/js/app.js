@@ -218,6 +218,7 @@ function buildAiChatPanel(){
     <div class="ai-chips">${AI_CHIPS.map(c=>`<button class="ai-chip" onclick="aiChipAsk(this)">${c}</button>`).join("")}</div>
     <div class="ai-chat-input">
       <input type="text" id="aiChatInput" placeholder="اكتب سؤالك..." maxlength="1000" onkeydown="if(event.key==='Enter') aiSend();">
+      <button id="aiChatMic" onclick="aiMic()" title="تحدث صوتياً 🎙️"><i class="fa-solid fa-microphone"></i></button>
       <button id="aiChatSend" onclick="aiSend()" title="إرسال"><i class="fa-solid fa-paper-plane"></i></button>
     </div>`;
   document.body.appendChild(panel);
@@ -274,6 +275,35 @@ function renderAiHistory(){
   body.scrollTop = body.scrollHeight;
 }
 function aiChipAsk(btn){ const inp = document.getElementById("aiChatInput"); if(inp){ inp.value = btn.textContent; aiSend(); } }
+
+/* تحدث صوتياً 🎙️ — Web Speech API (كروم/أندرويد) */
+let _aiRecog = null;
+function aiMic(){
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if(!SR){ toast("المتصفح لا يدعم الإدخال الصوتي — جرّب كروم", "error"); return; }
+  const btn = document.getElementById("aiChatMic");
+  if(_aiRecog){ try{ _aiRecog.stop(); }catch(e){} return; }
+  try{
+    const rec = new SR();
+    rec.lang = "ar-SA";
+    rec.interimResults = false;
+    rec.maxAlternatives = 1;
+    _aiRecog = rec;
+    if(btn) btn.classList.add("rec");
+    toast("🎙️ تحدث الآن...");
+    rec.onresult = (ev)=>{
+      const txt = ev.results && ev.results[0] && ev.results[0][0] ? ev.results[0][0].transcript : "";
+      if(txt.trim()){
+        const inp = document.getElementById("aiChatInput");
+        if(inp) inp.value = txt.trim();
+        aiSend();
+      }
+    };
+    rec.onerror = ()=>{ toast("تعذّر السماع — حاول مجدداً", "error"); };
+    rec.onend = ()=>{ _aiRecog = null; if(btn) btn.classList.remove("rec"); };
+    rec.start();
+  }catch(err){ _aiRecog = null; if(btn) btn.classList.remove("rec"); toast("تعذّر تشغيل المايك", "error"); }
+}
 
 async function aiSend(){
   const inp = document.getElementById("aiChatInput");

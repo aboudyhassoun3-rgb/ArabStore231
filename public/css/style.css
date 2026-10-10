@@ -658,6 +658,8 @@ img{ max-width:100%; display:block; }
 .ai-chat-input input:focus{ border-color:var(--accent); }
 .ai-chat-input button{ width:42px; height:42px; border-radius:50%; border:none; background:linear-gradient(135deg, #ff2d55, #8b2fc9); color:#fff; font-size:15px; cursor:pointer; flex-shrink:0; display:flex; align-items:center; justify-content:center; }
 .ai-chat-input button:disabled{ opacity:.5; }
+.ai-chat-input #aiChatMic{ background:var(--card-soft); border:1px solid var(--border); color:var(--text); }
+.ai-chat-input #aiChatMic.rec{ background:#e63946; border-color:#e63946; color:#fff; animation:aiBlink 1s infinite; }
 
 /* =========================================================
    نماذج / مصادقة (Login & Register)

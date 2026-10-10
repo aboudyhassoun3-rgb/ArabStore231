@@ -9,7 +9,7 @@
 <link rel="apple-touch-icon" href="/site-icon">
 <meta name="theme-color" content="#e63946">
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.1/css/all.min.css">
-<link rel="stylesheet" href="css/style.css?v=25">
+<link rel="stylesheet" href="css/style.css?v=26">
 </head>
 <body>
 
@@ -142,7 +142,7 @@
   </div>
 </div>
 
-<script src="js/app.js?v=7"></script>
+<script src="js/app.js?v=8"></script>
 <script>
   const ART_POOL = ["art-red","art-gold","art-purple","art-green","art-blue","art-pink"];
   function getParam(name){ return new URLSearchParams(location.search).get(name); }
@@ -152,6 +152,8 @@
   let productImage = "";
   let productEmoji = "";
   let productSection = "";
+  let sectionDisc = 0;
+  let sectionTierName = "";
   let selected = null;
   let qty = 1;
 
@@ -176,10 +178,12 @@
     try{
       if(Store.token()){
         const td = await apiFetch("/tier-discounts");
+        sectionTierName = td.tier_name || "";
         const d = productSection && td.discounts ? Number(td.discounts[productSection] || 0) : 0;
-        if(d > 0){
+        sectionDisc = d > 0 ? d : 0;
+        if(sectionDisc > 0){
           const note = document.getElementById("tierDiscountNote");
-          if(note){ note.style.display = "flex"; note.querySelector("span").textContent = `خصم رتبتك (${td.tier_name}) على هذا القسم: ${d}% 🎖️`; }
+          if(note){ note.style.display = "flex"; note.querySelector("span").textContent = `خصم رتبتك (${sectionTierName}) على هذا القسم: ${sectionDisc}% 🎖️`; }
         }
       }
     }catch(err){ /* الخصم اختياري ولا يكسر الصفحة */ }
@@ -209,6 +213,10 @@
   function renderPackages(){
     document.getElementById("packagesList").innerHTML = packages.map((p,i)=>{
       const available = p.price_usd != null && p.price_usd >= 0 && p.available !== false;
+      const priceHtml = !available ? '—'
+        : sectionDisc > 0
+          ? `<s style="color:var(--muted); font-size:11px; margin-left:6px;">${Currency.format(p.price_usd)}</s><b style="color:var(--gold);">${Currency.format(p.price_usd * (1 - sectionDisc/100))}</b> <span class="badge-vip" style="font-size:9px;">-${sectionDisc}%</span>`
+          : Currency.format(p.price_usd);
       return `
       <div class="package-card ${available ? '' : 'unavailable'}">
         <div class="pcard-art ${(p.image || productImage) ? '' : ART_POOL[i % ART_POOL.length]}">
@@ -217,7 +225,7 @@
         <div class="pcard-body">
           <div class="pcard-name">${p.name}</div>
           <div class="pcard-price">
-            ${available ? Currency.format(p.price_usd) : '—'}
+            ${priceHtml}
           </div>
           <button class="pcard-buy" ${available ? `onclick="openBuySheet(${p.id})"` : 'disabled'}>
             ${available ? '<i class="fa-solid fa-cart-shopping"></i> شراء' : '<i class="fa-solid fa-ban"></i> غير متوفر'}
@@ -300,8 +308,10 @@
 
   function updateBuySheetTotal(){
     if(!selected) return;
-    const total = selected.price_usd * qty / (selected.unit_qty || 1);
-    document.getElementById("bsTotal").textContent = Currency.format(total);
+    const full = selected.price_usd * qty / (selected.unit_qty || 1);
+    const total = full * (1 - (sectionDisc || 0) / 100);
+    document.getElementById("bsTotal").textContent = Currency.format(total)
+      + (sectionDisc > 0 ? ` (شامل خصم ${sectionDisc}%)` : "");
     const user = Store.user();
     const bal = user ? Number(user.balance||0) : 0;
     document.getElementById("bsBalance").textContent = Currency.format(bal);

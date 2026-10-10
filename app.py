@@ -293,6 +293,7 @@ CREATE TABLE IF NOT EXISTS web_admins(email TEXT PRIMARY KEY);
 CREATE TABLE IF NOT EXISTS tiers(id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT, percent REAL DEFAULT 0, min_spent REAL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS user_tier(user_id INTEGER PRIMARY KEY, tier_id INTEGER);
 CREATE TABLE IF NOT EXISTS tier_section_discounts(tier_id INTEGER, section TEXT, percent REAL DEFAULT 0, PRIMARY KEY(tier_id, section));
+CREATE TABLE IF NOT EXISTS ai_memory(id INTEGER PRIMARY KEY AUTOINCREMENT, question TEXT DEFAULT '', reply TEXT DEFAULT '', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP);
 CREATE TABLE IF NOT EXISTS referrals(code TEXT PRIMARY KEY, owner_id INTEGER, uses INTEGER DEFAULT 0);
 """
 
@@ -348,6 +349,7 @@ def init_db():
                     "ALTER TABLE products ADD COLUMN notes TEXT DEFAULT ''",
                     "ALTER TABLE orders ADD COLUMN provider_id INTEGER DEFAULT NULL",
                     "CREATE TABLE IF NOT EXISTS tier_section_discounts(tier_id INTEGER, section TEXT, percent REAL DEFAULT 0, PRIMARY KEY(tier_id, section))",
+                    "CREATE TABLE IF NOT EXISTS ai_memory(id INTEGER PRIMARY KEY AUTOINCREMENT, question TEXT DEFAULT '', reply TEXT DEFAULT '', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
                     "ALTER TABLE providers ADD COLUMN order_path TEXT DEFAULT ''",
                     "ALTER TABLE providers ADD COLUMN status_path TEXT DEFAULT ''",
                     "ALTER TABLE providers ADD COLUMN catalog_path TEXT DEFAULT ''",
@@ -369,6 +371,7 @@ def init_db():
                      "ai_agent_api_url": "", "ai_agent_api_key": "", "ai_agent_model": "",
                      "ai_agent_prompt": "",
                      "ai_agent_welcome": "أهلاً فيك! أنا مساعد المتجر 🤖 اسألني عن أي منتج أو سعر أو طريقة شحن.",
+                     "auto_tier_enabled": "false",
                      "maintenance_enabled": "false", "maintenance_ends_at": ""}
         for k, v in defaults.items():
             try: db.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO NOTHING" if USE_PG
@@ -518,6 +521,37 @@ def user_section_discounts(uid):
     except Exception:
         pass
     return out
+
+def maybe_auto_tier(uid):
+    """ترقية تلقائية: من يتجاوز إنفاقه (طلبات مكتملة) حد رتبة يُرقّى وحده.
+    ترقية فقط — لا تخفيض أبداً (رتبة الإدارة اليدوية الأعلى تبقى)."""
+    try:
+        if get_setting("auto_tier_enabled", "false") != "true":
+            return
+        with get_db() as db:
+            try:
+                total = float(db.execute("SELECT COALESCE(SUM(price_usd),0) FROM orders WHERE user_id=? AND status='completed'", (uid,)).fetchone()[0] or 0)
+            except Exception:
+                return
+            try:
+                best = db.execute("SELECT id,name,min_spent FROM tiers WHERE min_spent<=? ORDER BY min_spent DESC, percent DESC LIMIT 1", (total,)).fetchone()
+            except Exception:
+                best = db.execute("SELECT id,name,min_spent FROM tiers ORDER BY percent DESC LIMIT 1").fetchone()
+            if not best:
+                return
+            cur = db.execute("SELECT t.id,t.name,t.min_spent FROM user_tier ut JOIN tiers t ON t.id=ut.tier_id WHERE ut.user_id=?", (uid,)).fetchone()
+            cur_spent = float(cur[2] or 0) if cur else -1
+            if cur and cur[0] == best[0]:
+                return
+            if cur and cur_spent >= float(best[2] or 0):
+                return  # رتبة يدوية أعلى — لا نخفضها
+            if USE_PG: db.execute("INSERT INTO user_tier(user_id,tier_id) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET tier_id=excluded.tier_id", (uid, best[0]))
+            else: db.execute("INSERT INTO user_tier(user_id,tier_id) VALUES(?,?) ON CONFLICT(user_id) DO UPDATE SET tier_id=excluded.tier_id", (uid, best[0]))
+            notify(uid, f"ترقية تلقائية 🎖️", f"مبروك! صرت برتبة {best[1]} بفضل مشترياتك", "success")
+            try: push_to_user(uid, "ترقية تلقائية 🎖️", f"صرت برتبة {best[1]}! خصومات جديدة بانتظارك", "/store.html")
+            except Exception: pass
+    except Exception:
+        pass
 
 def is_admin(email):
     e = (email or "").lower()
@@ -1440,6 +1474,8 @@ def order_create():
         _cost = float(s[6] if len(s) > 6 and s[6] else (s[3] or 0)) * qty
         oid = _insert_order(db, uid, pname, s[2], price_usd * qty, price_syp, player, qty, status, porder, resp, ouuid or f"{uid}-{int(time.time())}", _cost, _pvid)
         notify(uid, "طلب جديد 🛒", f"{pname} — {s[2]} — {status}", "success" if ok else "error")
+    if status == "completed":
+        maybe_auto_tier(uid)
     if manual:
         return jsonify({"message": "تم استلام طلبك وهو بانتظار مراجعة الإدارة ⏳", "order_id": oid, "status": status})
     return jsonify({"message": "تم تنفيذ طلبك بنجاح ✅", "order_id": oid, "status": status})
@@ -1477,6 +1513,8 @@ def order_refresh(oid):
             try: db.execute("INSERT INTO transactions(user_id,type,amount,note) VALUES(?, 'in', ?, ?)", (uid, int(o[2] or 0), f"استرجاع رصيد طلب فاشل #{oid}"))
             except Exception: pass
             notify(uid, "❌ فشل الطلب", f"تم استرجاع {int(o[2] or 0):,} ل.س إلى رصيدك", "error")
+        if st == "completed":
+            maybe_auto_tier(uid)
     return jsonify({"status": st, "changed": True,
                     "reply": latest, "reply_items": _parse_reply_items(latest)})
 
@@ -1658,6 +1696,8 @@ def v1_order():
         db.execute("UPDATE balances SET balance=balance-? WHERE user_id=?", (int(cost * rate()), uid))
         _vcost = float(s[4] if len(s) > 4 and s[4] else cost / max(qty, 1)) * qty
         oid = _insert_order(db, uid, "API", s[2], cost, int(cost * rate()), player, qty, _vst, porder, resp, b.get("order_uuid") or "", _vcost, _pvid)
+    if _vst == "completed":
+        maybe_auto_tier(uid)
     return jsonify({"order_id": oid, "status": _vst, "provider_order": porder})
 
 # ================= ADMIN =================
@@ -1736,6 +1776,8 @@ def aorder_st(ref):
         else:
             notify(o[1], "تم قبول طلبك ✅", o[3], "success")
             push_to_user(o[1], "تم قبول طلبك ✅", o[3], "/orders.html")
+            if st == "completed":
+                maybe_auto_tier(o[1])
     alog("✅ قبول طلب" if st != "failed" else "❌ رفض طلب", f"S{o[0]}", o[3])
     return jsonify({"message": "تم ✅"})
 
@@ -2710,6 +2752,7 @@ def ensure_extra():
                     "ALTER TABLE providers ADD COLUMN balance_cache TEXT DEFAULT ''",
                     "ALTER TABLE providers ADD COLUMN balance_at TEXT DEFAULT ''",
                     "CREATE TABLE IF NOT EXISTS tier_section_discounts(tier_id INTEGER, section TEXT, percent REAL DEFAULT 0, PRIMARY KEY(tier_id, section))",
+                    "CREATE TABLE IF NOT EXISTS ai_memory(id INTEGER PRIMARY KEY AUTOINCREMENT, question TEXT DEFAULT '', reply TEXT DEFAULT '', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
                     "CREATE TABLE IF NOT EXISTS admin_logs(id INTEGER PRIMARY KEY AUTOINCREMENT, actor TEXT DEFAULT '', action TEXT DEFAULT '', target TEXT DEFAULT '', detail TEXT DEFAULT '', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)",
                     "UPDATE orders SET order_uuid=('TRK-'||id) WHERE order_uuid IS NULL OR order_uuid=''"])
         # الفهارس هنا بعد اكتمال كل الجداول (بما فيها auth_tokens وcategory_links).
@@ -2915,6 +2958,13 @@ def ai_agent_chat():
         return jsonify({"reply": f"عذراً، تعذّر الرد حالياً ⏳ حاول مجدداً أو تواصل مع الإدارة: {tg}"})
     if not reply:
         reply = "لم أفهم سؤالك تماماً — جرّب تسألني عن منتج أو سعر أو طريقة شحن 🤖"
+    # ذاكرة الوكيل: حفظ السؤال والرد لمراجعة الأدمن وتحسين البرومبت (لا يكسر الرد أبداً)
+    try:
+        with get_db() as db:
+            db.execute("INSERT INTO ai_memory(question,reply) VALUES(?,?)", (msg[:300], reply[:300]))
+            db.execute("DELETE FROM ai_memory WHERE id NOT IN (SELECT id FROM ai_memory ORDER BY id DESC LIMIT 300)")
+    except Exception:
+        pass
     return jsonify({"reply": reply})
 
 @app.get("/api/admin/ai-agent")
@@ -2952,6 +3002,37 @@ def adm_ai_test():
     except ValueError as e:
         return jsonify({"message": f"فشل الاتصال ({e}) — تحقق من الرابط والمفتاح واسم النموذج"}), 502
     return jsonify({"message": "الاتصال يعمل ✅", "reply": reply or "…"})
+
+@app.get("/api/admin/ai-memory")
+@require_admin
+def adm_ai_memory():
+    """ذاكرة الوكيل: أحدث المحادثات مع بحث — لتعرف بماذا عجز وتحسّن البرومبت."""
+    try: limit = max(1, min(int(request.args.get("limit") or 100), 300))
+    except Exception: limit = 100
+    q = (request.args.get("q") or "").strip()
+    with get_db() as db:
+        try:
+            if q:
+                like = f"%{q}%"
+                rows = db.execute("SELECT id,question,reply,created_at FROM ai_memory WHERE question LIKE ? OR reply LIKE ? ORDER BY id DESC LIMIT ?", (like, like, limit)).fetchall()
+            else:
+                rows = db.execute("SELECT id,question,reply,created_at FROM ai_memory ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+            total = db.execute("SELECT COUNT(*) FROM ai_memory").fetchone()[0]
+        except Exception:
+            return jsonify({"items": [], "total": 0})
+    return jsonify({"total": int(total or 0),
+                    "items": [{"id": r[0], "question": r[1] or "", "reply": r[2] or "", "date": str(r[3])} for r in rows]})
+
+@app.delete("/api/admin/ai-memory")
+@require_admin
+def adm_ai_memory_clear():
+    b = request.get_json(force=True, silent=True) or {}
+    with get_db() as db:
+        if b.get("id"):
+            db.execute("DELETE FROM ai_memory WHERE id=?", (int(b["id"]),))
+        else:
+            db.execute("DELETE FROM ai_memory")
+    return jsonify({"message": "تم المسح ✅"})
 
 # --- إشعارات الأدمن + push ---
 def _vapid_keys():
@@ -3348,6 +3429,8 @@ def _client_place(pid):
         db.execute("UPDATE balances SET balance=balance-? WHERE user_id=?", (int(cost * rate()), uid))
         _ccost = float(s[8] if len(s) > 8 and s[8] else cost / max(qty, 1)) * qty
         oid = _insert_order(db, uid, p[0] if p else "", s[2], cost, int(cost * rate()), player, qty, _cst, porder, resp, ouuid or f"c-{uid}-{int(time.time())}", _ccost, _pvid)
+    if _cst == "completed":
+        maybe_auto_tier(uid)
     return jsonify({"status": "OK", "data": {"order_id": f"ID_{oid}", "status": "processing" if ok else ("pending" if _cst == "pending" else "failed"), "price": cost, "data": {"playerId": player}, "replay_api": []}})
 
 @app.route("/client/api/newOrder/<string:pid>", methods=["GET", "POST"])
@@ -3394,6 +3477,7 @@ def adm_shop_acc(oid):
         db.execute("UPDATE orders SET status='completed' WHERE id=?", (oid,))
         notify(o[0], "تم قبول طلبك ✅", o[1], "success")
         push_to_user(o[0], "تم قبول طلبك ✅", o[1], "/orders.html")
+        maybe_auto_tier(o[0])
     alog("✅ قبول طلب يدوي", f"S{oid}", o[1])
     return jsonify({"message": "تم القبول ✅"})
 
