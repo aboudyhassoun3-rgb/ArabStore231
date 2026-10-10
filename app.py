@@ -962,7 +962,7 @@ def provider_buy(sku_row, player, qty, token=None, url=None, product_ref=None, o
     tok = (token or PROVIDER_TOKEN or "").strip()
     base = ((url or PROVIDER_URL or "").strip().rstrip("/") or "https://api.shams4store.com")
     if not tok:
-        return True, "completed", f"LOCAL-{uuid.uuid4().hex[:8]}", "تم التنفيذ محلياً (لا يوجد مزوّد مربوط)"
+        return False, "pending", f"MANUAL-{uuid.uuid4().hex[:8]}", "بانتظار مراجعة الإدارة ⏳"
     if (order_path or "").strip():
         try:
             import requests as _rq
@@ -1015,6 +1015,7 @@ def sku_provider(sku_id):
 def provider_status(porder, provider_id=None):
     """يرجع (status, reply) — reply هو رد المزوّد (الرقم/الكود) عند توفره."""
     if not porder or porder.startswith("LOCAL-"): return "completed", ""
+    if porder.startswith("MANUAL-"): return "pending", ""  # يدوي — لا يُكمل نفسه أبداً، فقط الأدمن يقبل/يرفض
     # أولاً: بيانات مزوّد هذا الطلب نفسه — وإلا لا يمكن متابعة الطلبات المرتبطة
     tok, base, spath, custom = None, None, "", False
     if provider_id:
@@ -1380,15 +1381,22 @@ def order_create():
         _ptok, _purl, _ppid, _pvid, _popath, _pspath, _linked = sku_provider(s[0])
         if _linked and not (_ptok or "").strip():
             return jsonify({"message": "هذا المنتج مربوط بمزوّد لكن بياناته ناقصة (توكن فارغ) — أعد إدخال التوكن من لوحة المزوّدين ثم أعد الربط، ولن يتم التنفيذ محلياً"}), 400
-        ok, status, porder, resp = provider_buy(s, player, qty, _ptok, _purl, _ppid, _popath)
+        manual = not _linked
+        if manual:
+            # غير مربوط بأي مزوّد → طلب يدوي بانتظار موافقة الأدمن (لا يكتمل فور الشراء)
+            ok, status, porder, resp = True, "pending", f"MANUAL-{uuid.uuid4().hex[:8]}", "بانتظار مراجعة الإدارة ⏳"
+        else:
+            ok, status, porder, resp = provider_buy(s, player, qty, _ptok, _purl, _ppid, _popath)
         if status == "pending":
-            notify(0, "طلب معلّق يحتاج تنفيذ ⏳", f"{pname} — {s[2]} — {player}", "info")
+            notify(0, "طلب معلّق يحتاج تنفيذ ⏳" if not manual else "طلب يدوي يحتاج مراجعة 🖐️", f"{pname} — {s[2]} — {player}", "info")
         if s[4] is not None: db.execute("UPDATE skus SET stock_qty=stock_qty-1 WHERE id=?", (s[0],))
         db.execute("UPDATE balances SET balance=balance-? WHERE user_id=?", (price_syp, uid))
         db.execute("INSERT INTO transactions(user_id,type,amount,note) VALUES(?, 'out', ?, ?)", (uid, -price_syp, f"شراء {pname} — {s[2]}"))
         _cost = float(s[6] if len(s) > 6 and s[6] else (s[3] or 0)) * qty
         oid = _insert_order(db, uid, pname, s[2], price_usd * qty, price_syp, player, qty, status, porder, resp, ouuid or f"{uid}-{int(time.time())}", _cost, _pvid)
         notify(uid, "طلب جديد 🛒", f"{pname} — {s[2]} — {status}", "success" if ok else "error")
+    if manual:
+        return jsonify({"message": "تم استلام طلبك وهو بانتظار مراجعة الإدارة ⏳", "order_id": oid, "status": status})
     return jsonify({"message": "تم تنفيذ طلبك بنجاح ✅", "order_id": oid, "status": status})
 
 @app.get("/api/orders/<int:oid>/refresh")
@@ -1428,13 +1436,13 @@ def order_refresh(oid):
                     "reply": latest, "reply_items": _parse_reply_items(latest)})
 
 def _order_source(provider_order):
-    """api إذا نُفّذ عبر مزوّد حقيقي (له رد يُعرض)، وإلا shop."""
+    """api إذا نُفّذ عبر مزوّد حقيقي (له رد يُعرض)، وإلا shop (يدوي/محلي/بانتظار الأدمن)."""
     po = str(provider_order or "")
-    return "api" if (po and not po.startswith("LOCAL-")) else "shop"
+    return "api" if (po and not po.startswith("LOCAL-") and not po.startswith("MANUAL-")) else "shop"
 
 
 # رسائل داخلية لا تُعرض للمستخدم كـ"رد مزوّد" (ضجيج تقني)
-_TECHNICAL_REPLY_MARKERS = ("تم التنفيذ محلياً", "provider-http-", "provider-error")
+_TECHNICAL_REPLY_MARKERS = ("تم التنفيذ محلياً", "بانتظار مراجعة الإدارة", "provider-http-", "provider-error")
 
 
 def _parse_reply_items(reply):
@@ -1589,7 +1597,12 @@ def v1_order():
         _ptok, _purl, _ppid, _pvid, _popath, _pspath, _linked = sku_provider(s[0])
         if _linked and not (_ptok or "").strip():
             return jsonify({"message": "المنتج مربوط بمزوّد لكن التوكن فارغ — أصلح بيانات المزوّد أولاً"}), 400
-        ok, _vst, porder, resp = provider_buy(s, player, qty, _ptok, _purl, _ppid, _popath)
+        if not _linked:
+            # غير مربوط → يدوي بانتظار الأدمن
+            ok, _vst, porder, resp = False, "pending", f"MANUAL-{uuid.uuid4().hex[:8]}", "بانتظار مراجعة الإدارة ⏳"
+            notify(0, "طلب API يدوي يحتاج مراجعة 🖐️", f"{s[2]} — {player}", "info")
+        else:
+            ok, _vst, porder, resp = provider_buy(s, player, qty, _ptok, _purl, _ppid, _popath)
         db.execute("UPDATE balances SET balance=balance-? WHERE user_id=?", (int(cost * rate()), uid))
         _vcost = float(s[4] if len(s) > 4 and s[4] else cost / max(qty, 1)) * qty
         oid = _insert_order(db, uid, "API", s[2], cost, int(cost * rate()), player, qty, _vst, porder, resp, b.get("order_uuid") or "", _vcost, _pvid)
@@ -2091,14 +2104,22 @@ def adm_skus(pid):
     with get_db() as db:
         try: rows = db.execute("SELECT id,name,price,cost,stock_qty,requires_id,public_id,image,min_qty,max_qty,unit_qty,type FROM skus WHERE product_id=?", (pid,)).fetchall()
         except Exception: rows = db.execute("SELECT id,name,price,cost,stock_qty,requires_id FROM skus WHERE product_id=?", (pid,)).fetchall()
+        try:
+            links = {lr[0]: {"provider_name": lr[1], "api_product_id": lr[2] or ""}
+                     for lr in db.execute("SELECT l.category_id,p.name,l.provider_product FROM category_links l JOIN providers p ON p.id=l.provider_id").fetchall()}
+        except Exception:
+            links = {}
     out = []
     for r in rows:
         full = len(r) > 6
+        lk = links.get(r[0])
         out.append({"id": r[0], "name": r[1], "price": r[2], "price_usd": r[2], "cost": r[3] if full else 0,
                     "stock_qty": r[4] if full else None, "requires_id": bool(r[5]) if full else True,
                     "public_id": (r[6] if full else "") or "", "image": (r[7] if full else "") or "",
                     "min_qty": (r[8] if full else 1) or 1, "max_qty": (r[9] if full else 1) or 1,
-                    "unit_qty": (r[10] if full else 1) or 1, "type": (r[11] if full else None) or "fixed"})
+                    "unit_qty": (r[10] if full else 1) or 1, "type": (r[11] if full else None) or "fixed",
+                    "linked": bool(lk), "provider_name": (lk or {}).get("provider_name", ""),
+                    "api_product_id": (lk or {}).get("api_product_id", "")})
     return jsonify(out)
 
 @app.post("/api/admin/products/<int:pid>/skus")
@@ -2106,13 +2127,36 @@ def adm_skus(pid):
 def adm_skus_add(pid):
     b = request.get_json(force=True, silent=True) or {}
     price = float(b.get("price") or 0)
+    # ربط اختياري مباشرة أثناء الإنشاء: provider_id + آيدي منتج المزوّد
+    link_pid = b.get("provider_id")
+    try: link_pid = int(link_pid) if link_pid not in (None, "") else None
+    except (TypeError, ValueError): link_pid = None
+    link_ref = (b.get("provider_product") or b.get("api_product_id") or "").strip()
     with get_db() as db:
-        db.execute("INSERT INTO skus(product_id,name,price,cost,stock_qty,requires_id,public_id,image,min_qty,max_qty,unit_qty,type) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
-                   (pid, b.get("name", "باقة"), price, float(b.get("cost", price) or 0),
-                    b.get("stock_qty"), 1 if b.get("requires_id", True) else 0, str(secrets.randbelow(90000) + 10000),
-                    b.get("image", ""), int(b.get("min_qty") or 1), int(b.get("max_qty") or b.get("min_qty") or 1),
-                    int(b.get("unit_qty") or 1), b.get("type", "fixed")))
-    return jsonify({"message": "تمت الإضافة ✅"})
+        try:
+            cur = db.execute("INSERT INTO skus(product_id,name,price,cost,stock_qty,requires_id,public_id,image,min_qty,max_qty,unit_qty,type) VALUES(?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id",
+                       (pid, b.get("name", "باقة"), price, float(b.get("cost", price) or 0),
+                        b.get("stock_qty"), 1 if b.get("requires_id", True) else 0, str(secrets.randbelow(90000) + 10000),
+                        b.get("image", ""), int(b.get("min_qty") or 1), int(b.get("max_qty") or b.get("min_qty") or 1),
+                        int(b.get("unit_qty") or 1), b.get("type", "fixed")))
+            skid = cur.fetchone()[0]
+        except Exception:
+            cur = db.execute("INSERT INTO skus(product_id,name,price,cost,stock_qty,requires_id,public_id,image,min_qty,max_qty,unit_qty,type) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+                       (pid, b.get("name", "باقة"), price, float(b.get("cost", price) or 0),
+                        b.get("stock_qty"), 1 if b.get("requires_id", True) else 0, str(secrets.randbelow(90000) + 10000),
+                        b.get("image", ""), int(b.get("min_qty") or 1), int(b.get("max_qty") or b.get("min_qty") or 1),
+                        int(b.get("unit_qty") or 1), b.get("type", "fixed")))
+            skid = cur.lastrowid
+        linked_msg = ""
+        if link_pid and link_ref:
+            if not db.execute("SELECT 1 FROM providers WHERE id=?", (link_pid,)).fetchone():
+                return jsonify({"message": "تمت إضافة الفئة ✅ لكن المزوّد المختار غير موجود — لم يتم الربط", "id": skid})
+            if USE_PG: db.execute("INSERT INTO category_links(category_id,provider_id,provider_product) VALUES(?,?,?) ON CONFLICT(category_id) DO UPDATE SET provider_id=excluded.provider_id,provider_product=excluded.provider_product", (skid, link_pid, link_ref))
+            else: db.execute("INSERT OR REPLACE INTO category_links(category_id,provider_id,provider_product) VALUES(?,?,?)", (skid, link_pid, link_ref))
+            pr = db.execute("SELECT name FROM providers WHERE id=?", (link_pid,)).fetchone()
+            linked_msg = f" ورُبطت تلقائياً بالمزوّد {pr[0] if pr else ''} ({link_ref}) 🔗"
+            alog("🔗 ربط فئة بمزوّد", b.get("name", "باقة"), f"{pr[0] if pr else ''} — {link_ref}")
+    return jsonify({"message": f"تمت إضافة الفئة ✅{linked_msg}", "id": skid})
 
 @app.put("/api/admin/skus/<int:skid>")
 @require_admin
@@ -3005,7 +3049,12 @@ def _client_place(pid):
         _ptok, _purl, _ppid, _pvid, _popath, _pspath, _linked = sku_provider(s[0])
         if _linked and not (_ptok or "").strip():
             return jsonify({"status": "error", "code": 121, "message": "المنتج مربوط بمزوّد لكن التوكن فارغ"}), 400
-        ok, _cst, porder, resp = provider_buy(s, player, qty, _ptok, _purl, _ppid, _popath)
+        if not _linked:
+            # غير مربوط → يدوي بانتظار الأدمن
+            ok, _cst, porder, resp = False, "pending", f"MANUAL-{uuid.uuid4().hex[:8]}", "بانتظار مراجعة الإدارة ⏳"
+            notify(0, "طلب يدوي يحتاج مراجعة 🖐️", f"{s[2]} — {player}", "info")
+        else:
+            ok, _cst, porder, resp = provider_buy(s, player, qty, _ptok, _purl, _ppid, _popath)
         if s[4] is not None: db.execute("UPDATE skus SET stock_qty=stock_qty-? WHERE id=?", (qty, s[0]))
         db.execute("UPDATE balances SET balance=balance-? WHERE user_id=?", (int(cost * rate()), uid))
         _ccost = float(s[8] if len(s) > 8 and s[8] else cost / max(qty, 1)) * qty

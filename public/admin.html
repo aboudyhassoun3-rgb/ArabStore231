@@ -352,7 +352,7 @@
         <div class="panel-head"><h3>الطلبات اليدوية (بإنتظار مراجعتك)</h3></div>
         <div class="info-banner" style="margin-bottom:12px;">
           <i class="fa-solid fa-bolt"></i>
-          <div>الطلبات التي تحتاج مراجعة يدوية (منتجات غير مربوطة بمزوّد API). بتقدر تقبل/ترفض أو تشحنها مباشرة عبر مزوّد.</div>
+          <div>الطلبات التي تحتاج مراجعة يدوية (منتجات غير مربوطة بمزوّد API — تُحجز كمبلغ مدفوع وتبقى <b>بانتظار موافقتك</b> ولا تكتمل فور الشراء). بتقدر تقبل/ترفض أو تشحنها مباشرة عبر مزوّد.</div>
         </div>
         <div class="table-scroll">
           <table class="data-table">
@@ -601,11 +601,16 @@
           <input type="number" id="newCategoryMaxQty" placeholder="الحد الأقصى" min="1" value="1" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);">
           <label style="display:flex; align-items:center; gap:7px; font-size:12px;"><input type="checkbox" id="newCategoryRequiresId" checked> يطلب ايدي اللاعب</label>
           <input type="number" id="newCategoryStock" placeholder="الكمية (اتركه فارغ = غير محدود)" min="0" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);">
+          <select id="newCategoryProvider" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text);">
+            <option value="">🔗 الربط: يدوي (بموافقة الأدمن)</option>
+          </select>
+          <input type="text" id="newCategoryApiProduct" placeholder="آيدي منتج المزوّد (إن اخترت مزوّداً)" style="padding:11px; border-radius:11px; border:1px solid var(--border); background:var(--card-soft); color:var(--text); direction:ltr;">
           <button class="btn btn-primary" onclick="addCategory()"><i class="fa-solid fa-plus"></i> إضافة فئة</button>
         </div>
+        <div class="field-hint" style="margin:-6px 0 12px;">اختر المزوّد وآيدي منتجه ليرتبط تلقائياً فور الإضافة ⚡ — أو اترك "يدوي" فيُباع بموافقتك من قسم الطلبات اليدوية 🖐️</div>
         <div class="table-scroll">
           <table class="data-table">
-            <thead><tr><th>الفئة</th><th>السعر $</th><th>المخزون</th><th>إجراء</th></tr></thead>
+            <thead><tr><th>الفئة</th><th>السعر $</th><th>المخزون</th><th>الربط</th><th>إجراء</th></tr></thead>
             <tbody id="categoriesTableBody"></tbody>
           </table>
         </div>
@@ -991,6 +996,6 @@
     }
   });
 </script>
-<script src="js/admin-data.js?v=7"></script>
+<script src="js/admin-data.js?v=8"></script>
 </body>
 </html>

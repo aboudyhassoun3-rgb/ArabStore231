@@ -978,7 +978,22 @@ async function openCategories(productId, productName){
   document.getElementById("categoriesPanel").style.display = "block";
   document.getElementById("categoriesPanelTitle").textContent = "فئات: " + productName;
   document.getElementById("categoriesPanel").scrollIntoView({ behavior:"smooth", block:"center" });
-  await loadCategories();
+  await Promise.all([loadCategories(), ensureProvidersCache()]);
+}
+/* قائمة المزوّدين لنموذج الربط السريع عند إضافة فئة */
+let _providersCache = null;
+async function ensureProvidersCache(){
+  const sel = document.getElementById("newCategoryProvider");
+  if(_providersCache && sel && sel.options.length > 1) return;
+  try{
+    _providersCache = await adminFetch("/admin/providers");
+  }catch(err){ return; }
+  if(sel){
+    const cur = sel.value;
+    sel.innerHTML = `<option value="">🔗 الربط: يدوي (بموافقة الأدمن)</option>` +
+      _providersCache.map(p=>`<option value="${p.id}">${p.name}${p.has_token ? "" : " ⚠️"}</option>`).join("");
+    if(cur) sel.value = cur;
+  }
 }
 async function loadCategories(){
   const cats = await adminFetch(`/admin/products/${currentProductId}/categories`);
@@ -987,6 +1002,7 @@ async function loadCategories(){
       <td>${c.image ? `<img src="${c.image}" style="width:26px; height:26px; border-radius:7px; object-fit:cover; vertical-align:middle; margin-left:6px;">` : ''}${c.name}</td>
       <td>$${c.price_usd}</td>
       <td>${c.stock_qty === null || c.stock_qty === undefined ? '<span style="color:var(--muted);">غير محدود</span>' : (c.stock_qty > 0 ? c.stock_qty : '<span style="color:var(--danger);">نفدت</span>')}</td>
+      <td>${c.linked ? `<span class="status-badge completed" title="${c.api_product_id||''}">🔗 ${c.provider_name||'مربوطة'}</span>` : '<span class="status-badge pending">🖐️ يدوي</span>'}</td>
       <td>
         <button class="btn-sm" onclick="pickImage('category', ${c.id})"><i class="fa-solid fa-camera"></i></button>
         <button class="btn-sm" onclick="openAiImage('category', ${c.id}, '${c.name.replace(/'/g,"")}')" title="إنشاء صورة بالذكاء الاصطناعي"><i class="fa-solid fa-wand-magic-sparkles"></i></button>
@@ -995,7 +1011,7 @@ async function loadCategories(){
         <button class="btn-sm danger" onclick="deleteCategory(${c.id})">حذف</button>
       </td>
     </tr>`).join("")
-    || `<tr><td colspan="4" class="text-muted" style="text-align:center; padding:12px;">لا توجد فئات بعد</td></tr>`;
+    || `<tr><td colspan="5" class="text-muted" style="text-align:center; padding:12px;">لا توجد فئات بعد</td></tr>`;
 }
 async function addCategory(){
   const name = document.getElementById("newCategoryName").value.trim();
@@ -1007,13 +1023,18 @@ async function addCategory(){
   const stockRaw = document.getElementById("newCategoryStock")?.value ?? "";
   const stock_qty = stockRaw.trim() === "" ? null : Number(stockRaw);
   const requires_id = document.getElementById("newCategoryRequiresId") ? document.getElementById("newCategoryRequiresId").checked : true;
+  const provider_id = document.getElementById("newCategoryProvider")?.value || "";
+  const api_product_id = document.getElementById("newCategoryApiProduct")?.value.trim() || "";
   if(!name || price <= 0){ toast("أدخل اسم الفئة وسعر صحيح", "error"); return; }
+  if(provider_id && !api_product_id){ toast("اخترت مزوّداً — أدخل آيدي منتج المزوّد أيضاً", "error"); return; }
   try{
-    await adminFetch(`/admin/products/${currentProductId}/categories`, { method:"POST", body: JSON.stringify({ name, price, type, unit_qty, min_qty, max_qty, stock_qty, requires_id }) });
-    toast("تمت إضافة الفئة ✅");
+    const r = await adminFetch(`/admin/products/${currentProductId}/categories`, { method:"POST", body: JSON.stringify({ name, price, type, unit_qty, min_qty, max_qty, stock_qty, requires_id, provider_id: provider_id || null, api_product_id }) });
+    toast(r.message || "تمت إضافة الفئة ✅");
     document.getElementById("newCategoryName").value = "";
     document.getElementById("newCategoryPrice").value = "";
     if(document.getElementById("newCategoryStock")) document.getElementById("newCategoryStock").value = "";
+    if(document.getElementById("newCategoryProvider")) document.getElementById("newCategoryProvider").value = "";
+    if(document.getElementById("newCategoryApiProduct")) document.getElementById("newCategoryApiProduct").value = "";
     loadCategories(); loadProducts();
   }catch(err){ toast(err.message, "error"); }
 }
