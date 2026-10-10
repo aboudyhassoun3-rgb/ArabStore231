@@ -2961,6 +2961,7 @@ def ai_agent_chat():
     # ذاكرة الوكيل: حفظ السؤال والرد لمراجعة الأدمن وتحسين البرومبت (لا يكسر الرد أبداً)
     try:
         with get_db() as db:
+            _ai_mem_ensure(db)
             db.execute("INSERT INTO ai_memory(question,reply) VALUES(?,?)", (msg[:300], reply[:300]))
             db.execute("DELETE FROM ai_memory WHERE id NOT IN (SELECT id FROM ai_memory ORDER BY id DESC LIMIT 300)")
     except Exception:
@@ -2970,9 +2971,13 @@ def ai_agent_chat():
 @app.get("/api/admin/ai-agent")
 @require_admin
 def adm_ai_get():
+    # نفس نمط adm_set_get المجرّب (بدون LIKE) — يعمل على كل القواعد
     with get_db() as db:
-        rows = db.execute("SELECT key,value FROM settings WHERE key LIKE 'ai_agent_%'").fetchall()
-    d = {r[0]: r[1] for r in rows}
+        try:
+            rows = db.execute("SELECT key,value FROM settings").fetchall()
+        except Exception:
+            rows = []
+    d = {r[0]: r[1] for r in rows if str(r[0]).startswith("ai_agent_")}
     d["ai_agent_api_key"] = "••••••" if (d.get("ai_agent_api_key") or "").strip() else ""
     return jsonify(d)
 
@@ -3003,6 +3008,14 @@ def adm_ai_test():
         return jsonify({"message": f"فشل الاتصال ({e}) — تحقق من الرابط والمفتاح واسم النموذج"}), 502
     return jsonify({"message": "الاتصال يعمل ✅", "reply": reply or "…"})
 
+def _ai_mem_ensure(db):
+    """يضمن وجود جدول الذاكرة (ينفع قواعد الإنتاج القديمة) — لا يرمي استثناء."""
+    try:
+        db.execute("CREATE TABLE IF NOT EXISTS ai_memory(id INTEGER PRIMARY KEY AUTOINCREMENT, question TEXT DEFAULT '', reply TEXT DEFAULT '', created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)")
+        return True
+    except Exception:
+        return False
+
 @app.get("/api/admin/ai-memory")
 @require_admin
 def adm_ai_memory():
@@ -3010,16 +3023,17 @@ def adm_ai_memory():
     try: limit = max(1, min(int(request.args.get("limit") or 100), 300))
     except Exception: limit = 100
     q = (request.args.get("q") or "").strip()
-    with get_db() as db:
-        try:
+    try:
+        with get_db() as db:
+            _ai_mem_ensure(db)
             if q:
                 like = f"%{q}%"
                 rows = db.execute("SELECT id,question,reply,created_at FROM ai_memory WHERE question LIKE ? OR reply LIKE ? ORDER BY id DESC LIMIT ?", (like, like, limit)).fetchall()
             else:
                 rows = db.execute("SELECT id,question,reply,created_at FROM ai_memory ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
             total = db.execute("SELECT COUNT(*) FROM ai_memory").fetchone()[0]
-        except Exception:
-            return jsonify({"items": [], "total": 0})
+    except Exception as e:
+        return jsonify({"items": [], "total": 0, "warning": f"تعذّر قراءة الذاكرة: {e}"})
     return jsonify({"total": int(total or 0),
                     "items": [{"id": r[0], "question": r[1] or "", "reply": r[2] or "", "date": str(r[3])} for r in rows]})
 
@@ -3027,11 +3041,15 @@ def adm_ai_memory():
 @require_admin
 def adm_ai_memory_clear():
     b = request.get_json(force=True, silent=True) or {}
-    with get_db() as db:
-        if b.get("id"):
-            db.execute("DELETE FROM ai_memory WHERE id=?", (int(b["id"]),))
-        else:
-            db.execute("DELETE FROM ai_memory")
+    try:
+        with get_db() as db:
+            _ai_mem_ensure(db)
+            if b.get("id"):
+                db.execute("DELETE FROM ai_memory WHERE id=?", (int(b["id"]),))
+            else:
+                db.execute("DELETE FROM ai_memory")
+    except Exception as e:
+        return jsonify({"message": f"تعذّر المسح: {e}"}), 500
     return jsonify({"message": "تم المسح ✅"})
 
 # --- إشعارات الأدمن + push ---

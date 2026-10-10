@@ -95,7 +95,7 @@ async function adminFetch(path, opts={}){
   const res = await fetch(API_BASE + path, Object.assign({}, opts, { headers }));
   const data = await res.json().catch(()=>null);
   if(res.status === 401){ adminLogout(); throw new Error("انتهت الجلسة"); }
-  if(!res.ok) throw new Error((data && data.message) || "حدث خطأ");
+  if(!res.ok) throw new Error((data && data.message) || `حدث خطأ (رمز ${res.status}) — انسخ هذه الرسالة وأرسلها للدعم`);
   return data;
 }
 
@@ -521,9 +521,20 @@ async function sendPushBroadcast(btn){
 }
 
 /* ===== المساعد الذكي 🤖 ===== */
+const AI_OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions";
+function onAiModelPreset(){
+  const sel = document.getElementById("aiModelPreset");
+  const v = sel ? sel.value : "";
+  if(!v || v === "custom"){ document.getElementById("aiModel")?.focus(); return; }
+  document.getElementById("aiModel").value = v;
+  const urlEl = document.getElementById("aiUrl");
+  if(urlEl && !urlEl.value.trim()) urlEl.value = AI_OPENROUTER_URL;
+  toast("تم تعبئة النموذج ✅ الصق المفتاح ثم احفظ وجرّب الاتصال");
+}
 async function loadAiAgent(){
-  try{
-    const s = await adminFetch("/admin/ai-agent");
+  for(let attempt = 0; attempt < 2; attempt++){
+    try{
+      const s = await adminFetch("/admin/ai-agent");
     document.getElementById("aiEnabled").checked = (s.ai_agent_enabled === "true");
     document.getElementById("aiName").value = s.ai_agent_name || "";
     document.getElementById("aiUrl").value = s.ai_agent_api_url || "";
@@ -534,7 +545,12 @@ async function loadAiAgent(){
     document.getElementById("aiWelcome").value = s.ai_agent_welcome || "";
     const ok = (s.ai_agent_enabled === "true") && s.ai_agent_api_url && s.ai_agent_model;
     document.getElementById("aiAgentStatus").textContent = ok ? "🟢 مفعّل وجاهز" : "⚪ غير مفعّل أو ناقص الإعداد";
-  }catch(err){ toast(err.message, "error"); }
+    return;
+    }catch(err){
+      if(attempt === 0){ await new Promise(r=>setTimeout(r, 1200)); continue; }
+      toast(err.message, "error");
+    }
+  }
 }
 async function saveAiAgent(){
   const body = {
@@ -571,11 +587,18 @@ async function testAiAgent(btn){
 /* ===== ذاكرة الوكيل 🧠 ===== */
 let ALL_AI_MEM = [];
 async function loadAiMemory(){
-  try{
-    const d = await adminFetch("/admin/ai-memory?limit=150");
-    ALL_AI_MEM = d.items || [];
-    document.getElementById("aiMemCount").textContent = `🧠 ${d.total || 0} محادثة محفوظة`;
-  }catch(err){ ALL_AI_MEM = []; toast(err.message, "error"); }
+  for(let attempt = 0; attempt < 2; attempt++){
+    try{
+      const d = await adminFetch("/admin/ai-memory?limit=150");
+      ALL_AI_MEM = d.items || [];
+      document.getElementById("aiMemCount").textContent = `🧠 ${d.total || 0} محادثة محفوظة` + (d.warning ? " — ⚠️ " + d.warning : "");
+      break;
+    }catch(err){
+      if(attempt === 0){ await new Promise(r=>setTimeout(r, 1200)); continue; }
+      ALL_AI_MEM = [];
+      toast(err.message, "error");
+    }
+  }
   renderAiMemory();
 }
 function renderAiMemory(){
