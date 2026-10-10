@@ -115,21 +115,14 @@ async function apiFetch(path, opts={}){
   return data;
 }
 
-/* ===== صورة البريد الإلكتروني: الأصلية أولاً + شعار Gmail الرسمي كبديل ===== */
-const GMAIL_OFFICIAL_IMG = "assets/gmail-official.svg";
+/* ===== صورة الحساب: الصورة الأصلية للبريد إن وُجدت، وإلا الأفاتار الأحمر الأساسي ===== */
+const AVATAR_RED_HTML = '<i class="fa-solid fa-user"></i>';
 let _avatarReq = 0;
 let _avatarPaintedFor = null;
 
-function _avatarLetterOf(user, email){
-  const src = ((user && user.name) || email || "B").trim();
-  const ch = src.charAt(0) || "B";
-  return ch.replace(/[<>&"']/g, "");
-}
-
-function _paintGmailFallback(){
+function _paintRedFallback(){
   document.querySelectorAll(".drawer-avatar").forEach(box=>{
-    box.classList.add("has-gmail");
-    box.innerHTML = `<img class="avatar-gmail" src="${GMAIL_OFFICIAL_IMG}" alt="Gmail" loading="lazy" decoding="async">`;
+    box.innerHTML = AVATAR_RED_HTML;
   });
 }
 
@@ -137,8 +130,7 @@ function _paintGmailFallback(){
 function _avatarImgFallback(img){
   const box = img && img.closest ? img.closest(".drawer-avatar") : null;
   if(!box) return;
-  box.classList.add("has-gmail");
-  box.innerHTML = `<img class="avatar-gmail" src="${GMAIL_OFFICIAL_IMG}" alt="Gmail" loading="lazy" decoding="async">`;
+  box.innerHTML = AVATAR_RED_HTML;
 }
 
 async function _sha256Hex(text){
@@ -147,7 +139,7 @@ async function _sha256Hex(text){
   return [...new Uint8Array(buf)].map(b=>b.toString(16).padStart(2,"0")).join("");
 }
 
-/* يعرض الصورة الأصلية للبريد (Gravatar) إن وُجدت، وإلا شعار Gmail الرسمي الجميل */
+/* يعرض الصورة الأصلية المرتبطة بالبريد (Gravatar) إن وُجدت، وإلا الأفاتار الأحمر الأساسي */
 function renderDrawerAvatar(user){
   const boxes = document.querySelectorAll(".drawer-avatar");
   if(!boxes.length) return;
@@ -155,22 +147,12 @@ function renderDrawerAvatar(user){
   // المزامنة الدورية (كل 30 ثانية) لا تعيد رسم نفس الصورة — تمنع الوميض
   if(email === _avatarPaintedFor && document.querySelector(".drawer-avatar img")) return;
   _avatarPaintedFor = email;
-  if(!email){
-    _paintGmailFallback();
-    return;
-  }
+  // الافتراضي دائماً: الأفاتار الأحمر الأساسي — ثم نحاول الترقية للصورة الأصلية
+  _paintRedFallback();
+  if(!email) return;
   const my = ++_avatarReq;
-  const letter = _avatarLetterOf(user, email);
-  // أثناء الفحص نعرض حرفاً جميلاً فوراً (بدون انتظار الشبكة)
-  boxes.forEach(box=>{
-    box.classList.remove("has-gmail");
-    box.innerHTML = `<span class="avatar-letter">${letter}</span>`;
-  });
-  // بدون WebCrypto (سياق غير آمن) — نعرض شعار Gmail الرسمي مباشرة
-  if(!window.crypto || !crypto.subtle || !window.TextEncoder){
-    if(my === _avatarReq) _paintGmailFallback();
-    return;
-  }
+  // بدون WebCrypto (سياق غير آمن) — نبقى على الأحمر الأساسي
+  if(!window.crypto || !crypto.subtle || !window.TextEncoder) return;
   _sha256Hex(email).then(hash=>{
     if(my !== _avatarReq) return;
     const url = "https://www.gravatar.com/avatar/" + hash + "?s=160&d=404";
@@ -179,15 +161,12 @@ function renderDrawerAvatar(user){
     probe.onload = ()=>{
       if(my !== _avatarReq) return;
       document.querySelectorAll(".drawer-avatar").forEach(box=>{
-        box.classList.remove("has-gmail");
         box.innerHTML = `<img class="avatar-photo" src="${url}" alt="" loading="lazy" decoding="async" onerror="_avatarImgFallback(this)">`;
       });
     };
-    probe.onerror = ()=>{ if(my === _avatarReq) _paintGmailFallback(); };
+    probe.onerror = ()=>{ /* لا توجد صورة أصلية — نبقى على الأحمر الأساسي */ };
     probe.src = url;
-    // أمان: إن علّق الفحص أكثر من 6 ثوانٍ نعرض البديل الرسمي
-    setTimeout(()=>{ if(my === _avatarReq && !probe.complete) _paintGmailFallback(); }, 6000);
-  }).catch(()=>{ if(my === _avatarReq) _paintGmailFallback(); });
+  }).catch(()=>{});
 }
 
 /* ===== الدرج: تحديث حالة المستخدم (زائر / مسجل) ===== */
